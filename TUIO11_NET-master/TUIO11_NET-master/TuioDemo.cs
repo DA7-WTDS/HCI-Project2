@@ -1,10 +1,13 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using System.ComponentModel;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
 using TUIO;
 
 namespace AnimalHomeGame_CSharp
@@ -97,6 +100,40 @@ namespace AnimalHomeGame_CSharp
             client = new TuioClient(port);
             client.addTuioListener(this);
             client.connect();
+
+            // Start socket client in background
+            Task.Run(() => stream());
+        }
+
+        public void stream()
+        {
+            Client c = new Client();
+            // Optional delay to ensure Python server is ready, or just try to connect
+            System.Threading.Thread.Sleep(1000); 
+
+            if (c.connectToSocket("localhost", 5000))
+            {
+                string msg = "";
+                while (true)
+                {
+                    msg = c.recieveMessage();
+                    if (msg == "q")
+                    {
+                        c.stream.Close();
+                        c.client.Close();
+                        Console.WriteLine("Connection Terminated !");
+                        break;
+                    }
+                    else if (!string.IsNullOrEmpty(msg))
+                    {
+                        // Example: Update the UI safely
+                        this.Invoke(new Action(() => {
+                            SetFeedback("Python: " + msg, Color.Green);
+                            Invalidate();
+                        }));
+                    }
+                }
+            }
         }
 
         private void RecalcLayout()
@@ -564,6 +601,50 @@ namespace AnimalHomeGame_CSharp
             }
 
             Application.Run(new TuioDemo(port));
+        }
+    }
+
+    class Client
+    {
+        public NetworkStream stream;
+        public TcpClient client;
+
+        public bool connectToSocket(string host, int portNumber)
+        {
+            try
+            {
+                client = new TcpClient(host, portNumber);
+                stream = client.GetStream();
+                Console.WriteLine("connection made ! with " + host);
+                return true;
+            }
+            catch (System.Net.Sockets.SocketException e)
+            {
+                Console.WriteLine("Connection Failed: " + e.Message);
+                return false;
+            }
+        }
+
+        public string recieveMessage()
+        {
+            try
+            {
+                byte[] receiveBuffer = new byte[1024];
+                int bytesReceived = stream.Read(receiveBuffer, 0, 1024);
+                if (bytesReceived > 0)
+                {
+                    Console.WriteLine(bytesReceived);
+                    string data = Encoding.UTF8.GetString(receiveBuffer, 0, bytesReceived);
+                    Console.WriteLine(data);
+                    return data;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Console.WriteLine("Receive error: " + e.Message);
+            }
+
+            return null;
         }
     }
 }
