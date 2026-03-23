@@ -1,23 +1,4 @@
-﻿/*
-    TuioDemo.cs — Self-contained Animal Home Game using the original TUIO C# demo architecture.
-
-    Architecture mirrors the original TUIO C# Demo by Martin Kaltenbrunner (GPL v2+):
-      • TuioClient + TuioListener implemented directly on the Form class
-      • objectList / cursorList / blobList dictionaries track all live TUIO events
-      • OnPaintBackground draws everything (no PictureBox controls)
-
-    Game UI matches the Animal Home Game design:
-      • Animals on the left  — controlled by TUIO markers
-      • Homes   on the right — animals must be dragged onto their matching home
-      • Images loaded from the Assets folder (or a fallback colour if missing)
-
-    Controls:
-      F1  — toggle fullscreen
-      V   — toggle verbose console output
-      Esc — exit
-*/
-
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -30,13 +11,11 @@ namespace AnimalHomeGame_CSharp
 {
     public class TuioDemo : Form, TuioListener
     {
-        // ── TUIO state (identical to original demo) ──────────────────────
         private TuioClient client;
         private Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(128);
         private Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
         private Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
 
-        // ── Window geometry (same fields as original demo) ───────────────
         public static int width, height;
         private int window_width = 1024;
         private int window_height = 768;
@@ -47,9 +26,6 @@ namespace AnimalHomeGame_CSharp
         private bool fullscreen = false;
         private bool verbose = false;
 
-        // ── Animal and home definitions ──────────────────────────────────
-        // Each animal has a name, the TUIO marker ID that controls it,
-        // its image file, and the name of the home it belongs to.
         private static readonly (string name, int tuioId, string image, string home)[] AnimalDefs =
         {
             ("Bird", 0, "bird.jpeg",  "Nest"),
@@ -66,30 +42,22 @@ namespace AnimalHomeGame_CSharp
             ("Farm",     "farm.jpeg"),
         };
 
-        // ── Game state ───────────────────────────────────────────────────
-        // Current position of each animal on screen (keyed by tuioId)
         private Dictionary<int, PointF> animalPositions = new Dictionary<int, PointF>();
-        // Starting position each animal returns to when dropped incorrectly
+        private Dictionary<int, float> animalAngles = new Dictionary<int, float>();
         private Dictionary<int, PointF> animalOrigins = new Dictionary<int, PointF>();
-        // True once an animal has been successfully snapped to its home
         private Dictionary<int, bool> animalMatched = new Dictionary<int, bool>();
-        // Maps a live TUIO session ID → the tuioId of the animal it controls
         private Dictionary<long, int> sessionToAnimal = new Dictionary<long, int>();
-        // Bounding rectangle of each home zone (for overlap detection on drop)
         private Dictionary<string, RectangleF> homeRects = new Dictionary<string, RectangleF>();
 
         private const int ITEM_W = 110;
         private const int ITEM_H = 100;
 
-        // ── Feedback bar ─────────────────────────────────────────────────
         private string feedbackText = "Place a TUIO marker on an animal and move it to its home!";
         private Color feedbackColor = Color.FromArgb(160, 20, 20, 40);
 
-        // ── Images ───────────────────────────────────────────────────────
         private Dictionary<string, Image> images = new Dictionary<string, Image>();
         private Image backgroundImage;
 
-        // ── Brushes / fonts (Animal Home Game colour palette) ────────────
         private readonly Font titleFont = new Font("Segoe UI", 13f, FontStyle.Bold);
         private readonly Font labelFont = new Font("Segoe UI", 10f, FontStyle.Bold);
         private readonly Font smallFont = new Font("Segoe UI", 9f);
@@ -98,7 +66,6 @@ namespace AnimalHomeGame_CSharp
         private readonly SolidBrush cursorBrush = new SolidBrush(Color.FromArgb(160, 80, 200));
         private readonly Pen trailPen = new Pen(Color.FromArgb(100, 160, 255), 2);
 
-        // ─────────────────────────────────────────────────────────────────
         public TuioDemo(int port)
         {
             this.Text = "Animal Home Game — TuioDemo";
@@ -107,7 +74,6 @@ namespace AnimalHomeGame_CSharp
             this.DoubleBuffered = true;
             this.BackColor = Color.FromArgb(15, 20, 50);
 
-            // Enable double-buffered flicker-free painting (same as original demo)
             this.SetStyle(
                 ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.UserPaint |
@@ -128,15 +94,11 @@ namespace AnimalHomeGame_CSharp
             LoadImages();
             RecalcLayout();
 
-            // Start TUIO (original demo pattern)
             client = new TuioClient(port);
             client.addTuioListener(this);
             client.connect();
         }
 
-        // ── Layout ───────────────────────────────────────────────────────
-        // Calculates where each animal and home sits on screen.
-        // Called once at startup and again whenever the window is resized.
         private void RecalcLayout()
         {
             int startY = 100;
@@ -151,10 +113,12 @@ namespace AnimalHomeGame_CSharp
 
                 animalOrigins[tuioId] = origin;
 
-                // Only reset position if the animal hasn't been matched yet
                 bool matched = animalMatched.ContainsKey(tuioId) && animalMatched[tuioId];
                 if (!matched)
+                {
                     animalPositions[tuioId] = origin;
+                    animalAngles[tuioId] = 0f;
+                }
 
                 if (!animalMatched.ContainsKey(tuioId))
                     animalMatched[tuioId] = false;
@@ -170,9 +134,6 @@ namespace AnimalHomeGame_CSharp
             }
         }
 
-        // ── Image loading ─────────────────────────────────────────────────
-        // Looks in the Assets folder next to the executable first,
-        // then falls back to the project source tree (useful in Visual Studio).
         private void LoadImages()
         {
             string[] searchRoots =
@@ -196,7 +157,7 @@ namespace AnimalHomeGame_CSharp
                     if (File.Exists(full))
                     {
                         try { images[fname] = Image.FromFile(full); }
-                        catch { /* skip unreadable files */ }
+                        catch { }
                         break;
                     }
                 }
@@ -205,7 +166,6 @@ namespace AnimalHomeGame_CSharp
             images.TryGetValue("background.jpeg", out backgroundImage);
         }
 
-        // ── Keyboard handler (identical behaviour to original demo) ───────
         private void Form_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyData == Keys.F1)
@@ -236,17 +196,12 @@ namespace AnimalHomeGame_CSharp
             else if (e.KeyData == Keys.V) verbose = !verbose;
         }
 
-        // ── Form close handler (identical to original demo) ───────────────
         private void Form_Closing(object sender, CancelEventArgs e)
         {
             client.removeTuioListener(this);
             client.disconnect();
             System.Environment.Exit(0);
         }
-
-        // ═════════════════════════════════════════════════════════════════
-        //   TuioListener — original demo methods + game logic layered on top
-        // ═════════════════════════════════════════════════════════════════
 
         public void addTuioObject(TuioObject o)
         {
@@ -256,7 +211,6 @@ namespace AnimalHomeGame_CSharp
                 Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ") "
                     + o.X + " " + o.Y + " " + o.Angle);
 
-            // Game: if this marker ID matches an animal, start tracking it
             foreach (var def in AnimalDefs)
             {
                 if (def.tuioId == o.getSymbolID() && !animalMatched[def.tuioId])
@@ -276,12 +230,12 @@ namespace AnimalHomeGame_CSharp
                     + " " + o.MotionSpeed + " " + o.RotationSpeed
                     + " " + o.MotionAccel + " " + o.RotationAccel);
 
-            // Game: move the animal to follow the marker position
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
                 float sx = o.getX() * width - ITEM_W / 2f;
                 float sy = o.getY() * height - ITEM_H / 2f;
                 animalPositions[tuioId] = new PointF(sx, sy);
+                animalAngles[tuioId] = (float)(o.Angle * 180.0 / Math.PI);
             }
         }
 
@@ -292,7 +246,6 @@ namespace AnimalHomeGame_CSharp
             if (verbose)
                 Console.WriteLine("del obj " + o.SymbolID + " (" + o.SessionID + ")");
 
-            // Game: marker was lifted — try to snap to home or return to origin
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
                 sessionToAnimal.Remove(o.SessionID);
@@ -338,18 +291,11 @@ namespace AnimalHomeGame_CSharp
             if (verbose) Console.WriteLine("del blb " + b.BlobID + " (" + b.SessionID + ")");
         }
 
-        // refresh() triggers a repaint — same as original demo
         public void refresh(TuioTime frameTime)
         {
             Invalidate();
         }
 
-        // ═════════════════════════════════════════════════════════════════
-        //   Game Logic
-        // ═════════════════════════════════════════════════════════════════
-
-        // When a marker is lifted, check if the animal overlaps its correct home.
-        // If yes, snap it into place. If no, send it back to its starting spot.
         private void TrySnapOrReturn(int tuioId)
         {
             string animalName = "";
@@ -364,10 +310,10 @@ namespace AnimalHomeGame_CSharp
             if (homeRects.TryGetValue(targetHome, out RectangleF homeRect)
                 && animalRect.IntersectsWith(homeRect))
             {
-                // Centre the animal inside the home
                 float snapX = homeRect.X + (homeRect.Width - ITEM_W) / 2f;
                 float snapY = homeRect.Y + (homeRect.Height - ITEM_H) / 2f;
                 animalPositions[tuioId] = new PointF(snapX, snapY);
+                animalAngles[tuioId] = 0f;
                 animalMatched[tuioId] = true;
                 SetFeedback("🎉 " + animalName + " is home!", Color.Gold);
                 CheckWinCondition();
@@ -375,11 +321,11 @@ namespace AnimalHomeGame_CSharp
             else
             {
                 animalPositions[tuioId] = animalOrigins[tuioId];
+                animalAngles[tuioId] = 0f;
                 SetFeedback("❌ Wrong home! " + animalName + " returned to start.", Color.OrangeRed);
             }
         }
 
-        // If every animal is matched, the player wins.
         private void CheckWinCondition()
         {
             foreach (bool matched in animalMatched.Values)
@@ -394,44 +340,26 @@ namespace AnimalHomeGame_CSharp
             feedbackColor = Color.FromArgb(190, baseColor.R / 3, baseColor.G / 3, baseColor.B / 3);
         }
 
-        // ═════════════════════════════════════════════════════════════════
-        //   OnPaintBackground — all drawing lives here (original demo approach)
-        // ═════════════════════════════════════════════════════════════════
         protected override void OnPaintBackground(PaintEventArgs pevent)
         {
             Graphics g = pevent.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            // 1. Background
             if (backgroundImage != null)
                 g.DrawImage(backgroundImage, 0, 0, width, height);
             else
                 g.FillRectangle(darkBg, 0, 0, width, height);
 
-            // Dark overlay so text and game items are always readable
             using (SolidBrush overlay = new SolidBrush(Color.FromArgb(110, 10, 15, 40)))
                 g.FillRectangle(overlay, 0, 0, width, height);
 
-            // 2. Feedback / HUD bar at the top
             DrawFeedbackBar(g);
-
-            // 3. Column headers
             DrawColumnHeaders(g);
-
-            // 4. Home zones (right column) — drawn first so animals appear on top
             DrawHomes(g);
-
-            // 5. Animals (left column, at their current tracked positions)
             DrawAnimals(g);
-
-            // 6. Cursor trails (original demo logic)
             DrawCursorTrails(g);
-
-            // 7. Status bar at the bottom (live TUIO counters)
             DrawStatusBar(g);
         }
-
-        // ── Individual drawing helpers ────────────────────────────────────
 
         private void DrawFeedbackBar(Graphics g)
         {
@@ -487,7 +415,6 @@ namespace AnimalHomeGame_CSharp
             {
                 if (!homeRects.TryGetValue(def.name, out RectangleF rect)) continue;
 
-                // Image or fallback colour
                 if (images.TryGetValue(def.image, out Image img))
                     g.DrawImage(img, rect);
                 else
@@ -496,11 +423,9 @@ namespace AnimalHomeGame_CSharp
                         g.FillRectangle(fb, rect);
                 }
 
-                // Gold border (Fixed3D styling equivalent)
                 using (Pen border = new Pen(Color.FromArgb(200, 255, 220, 80), 2))
                     g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
 
-                // Name label above the home image
                 RectangleF labelRect = new RectangleF(rect.X, rect.Y - 22, rect.Width, 20);
                 using (SolidBrush lbg = new SolidBrush(Color.FromArgb(140, 0, 0, 0)))
                     g.FillRectangle(lbg, labelRect);
@@ -523,8 +448,16 @@ namespace AnimalHomeGame_CSharp
                 bool grabbed = sessionToAnimal.ContainsValue(def.tuioId);
 
                 RectangleF rect = new RectangleF(pos.X, pos.Y, ITEM_W, ITEM_H);
+                float angle = animalAngles.ContainsKey(def.tuioId) ? animalAngles[def.tuioId] : 0f;
 
-                // Image or fallback colour
+                GraphicsState state = g.Save();
+
+                float cx = rect.X + rect.Width / 2f;
+                float cy = rect.Y + rect.Height / 2f;
+                g.TranslateTransform(cx, cy);
+                g.RotateTransform(angle);
+                g.TranslateTransform(-cx, -cy);
+
                 if (images.TryGetValue(def.image, out Image img))
                     g.DrawImage(img, rect);
                 else
@@ -533,7 +466,6 @@ namespace AnimalHomeGame_CSharp
                         g.FillRectangle(fb, rect);
                 }
 
-                // Border: gold = matched, cyan = being grabbed, white = idle
                 Color borderColor = matched ? Color.Gold
                                   : grabbed ? Color.Cyan
                                   : Color.White;
@@ -541,14 +473,14 @@ namespace AnimalHomeGame_CSharp
                 using (Pen border = new Pen(borderColor, borderWidth))
                     g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
 
-                // Glow behind the grabbed animal so it visually "pops"
                 if (grabbed)
                 {
                     using (Pen glow = new Pen(Color.FromArgb(60, 0, 220, 255), 8))
                         g.DrawRectangle(glow, rect.X - 4, rect.Y - 4, rect.Width + 8, rect.Height + 8);
                 }
 
-                // Name + marker ID label above the animal image
+                g.Restore(state);
+
                 RectangleF labelRect = new RectangleF(rect.X, rect.Y - 22, rect.Width, 20);
                 using (SolidBrush lbg = new SolidBrush(Color.FromArgb(140, 0, 0, 0)))
                     g.FillRectangle(lbg, labelRect);
@@ -556,7 +488,6 @@ namespace AnimalHomeGame_CSharp
             }
         }
 
-        // Draws cursor motion trails exactly as the original demo does
         private void DrawCursorTrails(Graphics g)
         {
             if (cursorList.Count == 0) return;
@@ -606,7 +537,6 @@ namespace AnimalHomeGame_CSharp
             g.DrawString(stats, smallFont, white, new PointF(10, height - 20));
         }
 
-        // ── Required by Windows Forms designer ───────────────────────────
         private void InitializeComponent()
         {
             this.SuspendLayout();
@@ -615,7 +545,6 @@ namespace AnimalHomeGame_CSharp
             this.ResumeLayout(false);
         }
 
-        // ── Entry point (same argument handling as original demo) ─────────
         public static void Main(string[] argv)
         {
             int port;
