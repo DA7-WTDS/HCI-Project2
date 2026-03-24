@@ -19,6 +19,9 @@ namespace AnimalHomeGame_CSharp
         private Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
         private Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
 
+        private MenuRenderer menuRenderer = new MenuRenderer();
+        private bool showMenu = true;
+
         public static int width, height;
         private int window_width = 1024;
         private int window_height = 768;
@@ -231,6 +234,7 @@ namespace AnimalHomeGame_CSharp
             }
             else if (e.KeyData == Keys.Escape) this.Close();
             else if (e.KeyData == Keys.V) verbose = !verbose;
+            else if (e.KeyData == Keys.M) { showMenu = !showMenu; Invalidate(); }
         }
 
         private void Form_Closing(object sender, CancelEventArgs e)
@@ -382,19 +386,37 @@ namespace AnimalHomeGame_CSharp
             Graphics g = pevent.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            if (backgroundImage != null)
-                g.DrawImage(backgroundImage, 0, 0, width, height);
+            if (showMenu)
+            {
+                // Dummy values to display the menu for testing
+                menuRenderer.Draw(g, width, height,
+                    currentSelection: 0,
+                    rotationAngle: 45f,
+                    navPresent: true,
+                    selectPresent: true,
+                    menuNavPos: new PointF(width / 2f - 60, height / 2f + 50),
+                    menuSelectPos: new PointF(width / 2f + 80, height / 2f + 20),
+                    confirmProximity: 0.75f,
+                    MENU_NAV_ID: 99,
+                    MENU_SELECT_ID: 100);
+            }
             else
-                g.FillRectangle(darkBg, 0, 0, width, height);
+            {
+                if (backgroundImage != null)
+                    g.DrawImage(backgroundImage, 0, 0, width, height);
+                else
+                    g.FillRectangle(darkBg, 0, 0, width, height);
 
-            using (SolidBrush overlay = new SolidBrush(Color.FromArgb(110, 10, 15, 40)))
-                g.FillRectangle(overlay, 0, 0, width, height);
+                using (SolidBrush overlay = new SolidBrush(Color.FromArgb(110, 10, 15, 40)))
+                    g.FillRectangle(overlay, 0, 0, width, height);
 
-            DrawFeedbackBar(g);
-            DrawColumnHeaders(g);
-            DrawHomes(g);
-            DrawAnimals(g);
-            DrawCursorTrails(g);
+                DrawFeedbackBar(g);
+                DrawColumnHeaders(g);
+                DrawHomes(g);
+                DrawAnimals(g);
+                DrawCursorTrails(g);
+            }
+            
             DrawStatusBar(g);
         }
 
@@ -569,7 +591,7 @@ namespace AnimalHomeGame_CSharp
                 $"Objects: {objectList.Count}   Cursors: {cursorList.Count}   Blobs: {blobList.Count}"
                 + $"   |   Matched: {matched}/{AnimalDefs.Length}"
                 + $"   |   Verbose: {(verbose ? "ON" : "OFF")}"
-                + $"   |   F1 = Fullscreen   V = Verbose   Esc = Exit";
+                + $"   |   F1 = Fullscreen   V = Verbose   M = Toggle Menu   Esc = Exit";
 
             g.DrawString(stats, smallFont, white, new PointF(10, height - 20));
         }
@@ -638,10 +660,16 @@ namespace AnimalHomeGame_CSharp
                     Console.WriteLine(data);
                     return data;
                 }
+                else if (bytesReceived == 0)
+                {
+                    // 0 bytes means the Python server closed the connection.
+                    return "q"; 
+                }
             }
             catch (System.Exception e)
             {
                 Console.WriteLine("Receive error: " + e.Message);
+                return "q"; // Also quit on error so it doesn't loop infinitely
             }
 
             return null;
