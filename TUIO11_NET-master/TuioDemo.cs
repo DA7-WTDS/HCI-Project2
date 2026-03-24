@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -48,7 +48,7 @@ namespace AnimalHomeGame_CSharp
             ("Bird", 0, "bird.jpeg",  "Nest"),
             ("Dog",  1, "dog.jpeg",   "Doghouse"),
             ("Fish", 2, "fish.jpeg",  "Water"),
-            ("Cow",  3, "farm.jpeg",  "Farm"),
+            ("Cow",  3, "Cow.jpeg",  "Farm"),
         };
 
         private static readonly (string name, string image)[] HomeDefs =
@@ -485,21 +485,7 @@ namespace AnimalHomeGame_CSharp
             Graphics g = pevent.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            if (showMenu)
-            {
-                // Dummy values to display the menu for testing
-                menuRenderer.Draw(g, width, height,
-                    currentSelection: 0,
-                    rotationAngle: 45f,
-                    navPresent: true,
-                    selectPresent: true,
-                    menuNavPos: new PointF(width / 2f - 60, height / 2f + 50),
-                    menuSelectPos: new PointF(width / 2f + 80, height / 2f + 20),
-                    confirmProximity: 0.75f,
-                    MENU_NAV_ID: 99,
-                    MENU_SELECT_ID: 100);
-            }
-            else if (currentState == GameState.WaitingForLogin)
+            if (currentState == GameState.WaitingForLogin)
             {
                 DrawLandingPage(g);
             }
@@ -863,16 +849,10 @@ namespace AnimalHomeGame_CSharp
                     string data = Encoding.UTF8.GetString(receiveBuffer, 0, bytesReceived);
                     return data;
                 }
-                else if (bytesReceived == 0)
-                {
-                    // 0 bytes means the Python server closed the connection.
-                    return "q"; 
-                }
             }
             catch (System.Exception e)
             {
                 Console.WriteLine("Receive error: " + e.Message);
-                return "q"; // Also quit on error so it doesn't loop infinitely
             }
 
             return null;
