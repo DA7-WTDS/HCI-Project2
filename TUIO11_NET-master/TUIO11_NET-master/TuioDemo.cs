@@ -14,6 +14,15 @@ namespace AnimalHomeGame_CSharp
 {
     public class TuioDemo : Form, TuioListener
     {
+        // ── Game State Machine ───────────────────────────────────────────
+        private enum GameState
+        {
+            WaitingForLogin,
+            Playing
+        }
+        private GameState currentState = GameState.WaitingForLogin;
+
+        // ── TUIO State ───────────────────────────────────────────────────
         private TuioClient client;
         private Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(128);
         private Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
@@ -22,6 +31,7 @@ namespace AnimalHomeGame_CSharp
         private MenuRenderer menuRenderer = new MenuRenderer();
         private bool showMenu = true;
 
+        // ── Window Geometry ──────────────────────────────────────────────
         public static int width, height;
         private int window_width = 1024;
         private int window_height = 768;
@@ -104,34 +114,48 @@ namespace AnimalHomeGame_CSharp
             client.addTuioListener(this);
             client.connect();
 
-            // Start socket client in background
+            // Start the background task to listen to the Python server
             Task.Run(() => stream());
         }
 
         public void stream()
         {
             Client c = new Client();
-            // Optional delay to ensure Python server is ready, or just try to connect
-            System.Threading.Thread.Sleep(1000); 
+            System.Threading.Thread.Sleep(1000);
 
             if (c.connectToSocket("localhost", 5000))
             {
                 string msg = "";
                 while (true)
                 {
-                    msg = c.recieveMessage();
-                    if (msg == "q")
+                    msg = c.receiveMessage();
+
+                    if (msg == "q" || msg == null)
                     {
-                        c.stream.Close();
-                        c.client.Close();
-                        Console.WriteLine("Connection Terminated !");
+                        if (c.stream != null) c.stream.Close();
+                        if (c.client != null) c.client.Close();
+                        Console.WriteLine("Connection Terminated!");
+
+                        // Optional: Reset to login screen if python disconnects
+                        this.Invoke(new Action(() => {
+                            currentState = GameState.WaitingForLogin;
+                            Invalidate();
+                        }));
                         break;
                     }
                     else if (!string.IsNullOrEmpty(msg))
                     {
-                        // Example: Update the UI safely
                         this.Invoke(new Action(() => {
-                            SetFeedback("Python: " + msg, Color.Green);
+                            if (msg.StartsWith("LOGIN:"))
+                            {
+                                string username = msg.Substring(6);
+                                currentState = GameState.Playing; // FLIP THE STATE TO PLAYING
+                                SetFeedback("👋 Welcome, " + username + "! Bluetooth Sign-in Successful.", Color.DeepSkyBlue);
+                            }
+                            else
+                            {
+                                SetFeedback("System: " + msg, Color.Green);
+                            }
                             Invalidate();
                         }));
                     }
@@ -252,6 +276,9 @@ namespace AnimalHomeGame_CSharp
                 Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ") "
                     + o.X + " " + o.Y + " " + o.Angle);
 
+            // Ignore game logic if we are still on the login screen
+            if (currentState != GameState.Playing) return;
+
             foreach (var def in AnimalDefs)
             {
                 if (def.tuioId == o.getSymbolID() && !animalMatched[def.tuioId])
@@ -271,6 +298,8 @@ namespace AnimalHomeGame_CSharp
                     + " " + o.MotionSpeed + " " + o.RotationSpeed
                     + " " + o.MotionAccel + " " + o.RotationAccel);
 
+            if (currentState != GameState.Playing) return;
+
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
                 float sx = o.getX() * width - ITEM_W / 2f;
@@ -286,6 +315,8 @@ namespace AnimalHomeGame_CSharp
 
             if (verbose)
                 Console.WriteLine("del obj " + o.SymbolID + " (" + o.SessionID + ")");
+
+            if (currentState != GameState.Playing) return;
 
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
@@ -400,7 +431,11 @@ namespace AnimalHomeGame_CSharp
                     MENU_NAV_ID: 99,
                     MENU_SELECT_ID: 100);
             }
-            else
+            else if (currentState == GameState.WaitingForLogin)
+            {
+                DrawLandingPage(g);
+            }
+            else if (currentState == GameState.Playing)
             {
                 if (backgroundImage != null)
                     g.DrawImage(backgroundImage, 0, 0, width, height);
@@ -415,8 +450,46 @@ namespace AnimalHomeGame_CSharp
                 DrawHomes(g);
                 DrawAnimals(g);
                 DrawCursorTrails(g);
+                DrawStatusBar(g);
             }
-            
+        }
+
+        private void DrawLandingPage(Graphics g)
+        {
+            // Dark solid background for the waiting screen
+            g.FillRectangle(darkBg, 0, 0, width, height);
+
+            StringFormat centre = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center
+            };
+
+            // Title
+            using (Font hugeFont = new Font("Segoe UI", 32f, FontStyle.Bold))
+            {
+                g.DrawString("ANIMAL HOME GAME", hugeFont, white, new RectangleF(0, height / 2 - 150, width, 60), centre);
+            }
+
+            // Status message
+            using (Font statusFont = new Font("Segoe UI", 16f, FontStyle.Bold))
+            {
+                g.DrawString("Awaiting Bluetooth Sign-In...", statusFont, Brushes.DeepSkyBlue, new RectangleF(0, height / 2 - 50, width, 40), centre);
+            }
+
+            // Instructions
+            using (Font instrFont = new Font("Segoe UI", 12f))
+            {
+                int yOffset = height / 2 + 20;
+                g.DrawString("1. Turn on your phone's Bluetooth.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset, width, 30), centre);
+                g.DrawString("2. Run the Python Login System on your server.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset + 35, width, 30), centre);
+                g.DrawString("3. Register or Sign In via the terminal to unlock the game.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset + 70, width, 30), centre);
+            }
+
+            // Draw cursor trails so the table feels "alive" even while locked
+            DrawCursorTrails(g);
+
+            // Draw status bar at the bottom
             DrawStatusBar(g);
         }
 
@@ -637,7 +710,7 @@ namespace AnimalHomeGame_CSharp
             {
                 client = new TcpClient(host, portNumber);
                 stream = client.GetStream();
-                Console.WriteLine("connection made ! with " + host);
+                Console.WriteLine("Connection made! with " + host);
                 return true;
             }
             catch (System.Net.Sockets.SocketException e)
@@ -647,7 +720,7 @@ namespace AnimalHomeGame_CSharp
             }
         }
 
-        public string recieveMessage()
+        public string receiveMessage()
         {
             try
             {
@@ -655,9 +728,7 @@ namespace AnimalHomeGame_CSharp
                 int bytesReceived = stream.Read(receiveBuffer, 0, 1024);
                 if (bytesReceived > 0)
                 {
-                    Console.WriteLine(bytesReceived);
                     string data = Encoding.UTF8.GetString(receiveBuffer, 0, bytesReceived);
-                    Console.WriteLine(data);
                     return data;
                 }
                 else if (bytesReceived == 0)
