@@ -14,21 +14,25 @@ namespace AnimalHomeGame_CSharp
 {
     public class TuioDemo : Form, TuioListener
     {
-        // ── Game State Machine ───────────────────────────────────────────
         private enum GameState
         {
             WaitingForLogin,
             Playing
         }
-        private GameState currentState = GameState.WaitingForLogin;
 
-        // ── TUIO State ───────────────────────────────────────────────────
+        private GameState currentState = GameState.WaitingForLogin;
         private TuioClient client;
+        private Client socketClient;
+
+        // --- NEW MENU STATE VARIABLES ---
+        private bool isMenuOpen = false;
+        private string hoveredSlice = "";
+        private string hintedHome = ""; // Tracks which home should glow
+
         private Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(128);
         private Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
         private Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
 
-        // ── Window Geometry ──────────────────────────────────────────────
         public static int width, height;
         private int window_width = 1024;
         private int window_height = 768;
@@ -111,31 +115,29 @@ namespace AnimalHomeGame_CSharp
             client.addTuioListener(this);
             client.connect();
 
-            // Start the background task to listen to the Python server
             Task.Run(() => stream());
         }
 
         public void stream()
         {
-            Client c = new Client();
+            socketClient = new Client();
             System.Threading.Thread.Sleep(1000);
 
-            if (c.connectToSocket("localhost", 5000))
+            if (socketClient.connectToSocket("localhost", 5000))
             {
-                string msg = "";
                 while (true)
                 {
-                    msg = c.receiveMessage();
+                    string msg = socketClient.receiveMessage();
 
                     if (msg == "q" || msg == null)
                     {
-                        if (c.stream != null) c.stream.Close();
-                        if (c.client != null) c.client.Close();
+                        if (socketClient.stream != null) socketClient.stream.Close();
+                        if (socketClient.client != null) socketClient.client.Close();
                         Console.WriteLine("Connection Terminated!");
 
-                        // Optional: Reset to login screen if python disconnects
                         this.Invoke(new Action(() => {
                             currentState = GameState.WaitingForLogin;
+                            isMenuOpen = false;
                             Invalidate();
                         }));
                         break;
@@ -143,20 +145,106 @@ namespace AnimalHomeGame_CSharp
                     else if (!string.IsNullOrEmpty(msg))
                     {
                         this.Invoke(new Action(() => {
-                            if (msg.StartsWith("LOGIN:"))
+                            // Split by newline in case Python sends multiple messages at the exact same millisecond
+                            string[] commands = msg.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+                            foreach (string cmd in commands)
                             {
-                                string username = msg.Substring(6);
-                                currentState = GameState.Playing; // FLIP THE STATE TO PLAYING
-                                SetFeedback("👋 Welcome, " + username + "! Bluetooth Sign-in Successful.", Color.DeepSkyBlue);
-                            }
-                            else
-                            {
-                                SetFeedback("System: " + msg, Color.Green);
+                                ProcessSocketCommand(cmd);
                             }
                             Invalidate();
                         }));
                     }
                 }
+            }
+        }
+
+        // --- NEW: Parses the logic from Python ---
+        private void ProcessSocketCommand(string cmd)
+        {
+            if (cmd.StartsWith("LOGIN:"))
+            {
+                string username = cmd.Substring(6);
+                currentState = GameState.Playing;
+                SetFeedback("👋 Welcome, " + username + "! Raise an open hand to view the menu.", Color.DeepSkyBlue);
+            }
+            else if (cmd.StartsWith("OPEN_MENU:"))
+            {
+                isMenuOpen = true;
+                hoveredSlice = cmd.Substring(10);
+            }
+            else if (cmd.StartsWith("HOVER:"))
+            {
+                hoveredSlice = cmd.Substring(6);
+            }
+            else if (cmd == "CANCEL")
+            {
+                isMenuOpen = false;
+            }
+            else if (cmd.StartsWith("SELECT:"))
+            {
+                string selection = cmd.Substring(7);
+                isMenuOpen = false;
+
+                if (selection == "Restart") ResetGame();
+                else if (selection == "Logout") PerformLogout();
+                else if (selection == "Hint") ShowHint();
+            }
+        }
+
+        // --- NEW: Action Methods ---
+        private void ResetGame()
+        {
+            foreach (var def in AnimalDefs)
+            {
+                animalPositions[def.tuioId] = animalOrigins[def.tuioId];
+                animalAngles[def.tuioId] = 0f;
+                animalMatched[def.tuioId] = false;
+            }
+            sessionToAnimal.Clear();
+            SetFeedback("🔄 Game Restarted! Match the animals to their homes.", Color.DodgerBlue);
+        }
+
+        private void PerformLogout()
+        {
+            currentState = GameState.WaitingForLogin;
+            ResetGame();
+            if (socketClient != null)
+            {
+                socketClient.sendMessage("LOGOUT\n");
+            }
+        }
+
+        private async void ShowHint()
+        {
+            string target = "";
+            foreach (var def in AnimalDefs)
+            {
+                if (!animalMatched.ContainsKey(def.tuioId) || !animalMatched[def.tuioId])
+                {
+                    target = def.home;
+                    break;
+                }
+            }
+
+            if (target != "")
+            {
+                hintedHome = target;
+                SetFeedback($"💡 Hint: Look for the {target}!", Color.Goldenrod);
+                Invalidate();
+
+                // Keep the glow on for 4 seconds
+                await Task.Delay(4000);
+
+                if (hintedHome == target)
+                {
+                    hintedHome = "";
+                    Invalidate();
+                }
+            }
+            else
+            {
+                SetFeedback("You've already matched them all!", Color.LimeGreen);
             }
         }
 
@@ -255,6 +343,10 @@ namespace AnimalHomeGame_CSharp
             }
             else if (e.KeyData == Keys.Escape) this.Close();
             else if (e.KeyData == Keys.V) verbose = !verbose;
+            else if (e.KeyData == Keys.L)
+            {
+                if (currentState == GameState.Playing) PerformLogout();
+            }
         }
 
         private void Form_Closing(object sender, CancelEventArgs e)
@@ -268,12 +360,7 @@ namespace AnimalHomeGame_CSharp
         {
             lock (objectList) objectList.Add(o.SessionID, o);
 
-            if (verbose)
-                Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ") "
-                    + o.X + " " + o.Y + " " + o.Angle);
-
-            // Ignore game logic if we are still on the login screen
-            if (currentState != GameState.Playing) return;
+            if (currentState != GameState.Playing || isMenuOpen) return;
 
             foreach (var def in AnimalDefs)
             {
@@ -288,13 +375,7 @@ namespace AnimalHomeGame_CSharp
 
         public void updateTuioObject(TuioObject o)
         {
-            if (verbose)
-                Console.WriteLine("set obj " + o.SymbolID + " " + o.SessionID + " "
-                    + o.X + " " + o.Y + " " + o.Angle
-                    + " " + o.MotionSpeed + " " + o.RotationSpeed
-                    + " " + o.MotionAccel + " " + o.RotationAccel);
-
-            if (currentState != GameState.Playing) return;
+            if (currentState != GameState.Playing || isMenuOpen) return;
 
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
@@ -309,10 +390,7 @@ namespace AnimalHomeGame_CSharp
         {
             lock (objectList) objectList.Remove(o.SessionID);
 
-            if (verbose)
-                Console.WriteLine("del obj " + o.SymbolID + " (" + o.SessionID + ")");
-
-            if (currentState != GameState.Playing) return;
+            if (currentState != GameState.Playing || isMenuOpen) return;
 
             if (sessionToAnimal.TryGetValue(o.SessionID, out int tuioId))
             {
@@ -324,39 +402,29 @@ namespace AnimalHomeGame_CSharp
         public void addTuioCursor(TuioCursor c)
         {
             lock (cursorList) cursorList.Add(c.SessionID, c);
-            if (verbose) Console.WriteLine("add cur " + c.CursorID + " (" + c.SessionID + ") " + c.X + " " + c.Y);
         }
 
         public void updateTuioCursor(TuioCursor c)
         {
-            if (verbose) Console.WriteLine("set cur " + c.CursorID + " (" + c.SessionID + ") " + c.X + " " + c.Y
-                + " " + c.MotionSpeed + " " + c.MotionAccel);
         }
 
         public void removeTuioCursor(TuioCursor c)
         {
             lock (cursorList) cursorList.Remove(c.SessionID);
-            if (verbose) Console.WriteLine("del cur " + c.CursorID + " (" + c.SessionID + ")");
         }
 
         public void addTuioBlob(TuioBlob b)
         {
             lock (blobList) blobList.Add(b.SessionID, b);
-            if (verbose) Console.WriteLine("add blb " + b.BlobID + " (" + b.SessionID + ") "
-                + b.X + " " + b.Y + " " + b.Angle + " " + b.Width + " " + b.Height + " " + b.Area);
         }
 
         public void updateTuioBlob(TuioBlob b)
         {
-            if (verbose) Console.WriteLine("set blb " + b.BlobID + " (" + b.SessionID + ") "
-                + b.X + " " + b.Y + " " + b.Angle + " " + b.Width + " " + b.Height + " " + b.Area
-                + " " + b.MotionSpeed + " " + b.RotationSpeed + " " + b.MotionAccel + " " + b.RotationAccel);
         }
 
         public void removeTuioBlob(TuioBlob b)
         {
             lock (blobList) blobList.Remove(b.SessionID);
-            if (verbose) Console.WriteLine("del blb " + b.BlobID + " (" + b.SessionID + ")");
         }
 
         public void refresh(TuioTime frameTime)
@@ -383,6 +451,10 @@ namespace AnimalHomeGame_CSharp
                 animalPositions[tuioId] = new PointF(snapX, snapY);
                 animalAngles[tuioId] = 0f;
                 animalMatched[tuioId] = true;
+
+                // Clear the hint if they successfully matched it!
+                if (hintedHome == targetHome) hintedHome = "";
+
                 SetFeedback("🎉 " + animalName + " is home!", Color.Gold);
                 CheckWinCondition();
             }
@@ -433,12 +505,17 @@ namespace AnimalHomeGame_CSharp
                 DrawAnimals(g);
                 DrawCursorTrails(g);
                 DrawStatusBar(g);
+
+                // --- NEW: Draw the Menu ON TOP of everything if it's open ---
+                if (isMenuOpen)
+                {
+                    DrawPieMenu(g);
+                }
             }
         }
 
         private void DrawLandingPage(Graphics g)
         {
-            // Dark solid background for the waiting screen
             g.FillRectangle(darkBg, 0, 0, width, height);
 
             StringFormat centre = new StringFormat
@@ -447,32 +524,83 @@ namespace AnimalHomeGame_CSharp
                 LineAlignment = StringAlignment.Center
             };
 
-            // Title
             using (Font hugeFont = new Font("Segoe UI", 32f, FontStyle.Bold))
             {
                 g.DrawString("ANIMAL HOME GAME", hugeFont, white, new RectangleF(0, height / 2 - 150, width, 60), centre);
             }
 
-            // Status message
             using (Font statusFont = new Font("Segoe UI", 16f, FontStyle.Bold))
             {
                 g.DrawString("Awaiting Bluetooth Sign-In...", statusFont, Brushes.DeepSkyBlue, new RectangleF(0, height / 2 - 50, width, 40), centre);
             }
 
-            // Instructions
             using (Font instrFont = new Font("Segoe UI", 12f))
             {
                 int yOffset = height / 2 + 20;
-                g.DrawString("1. Turn on your phone's Bluetooth.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset, width, 30), centre);
-                g.DrawString("2. Run the Python Login System on your server.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset + 35, width, 30), centre);
-                g.DrawString("3. Register or Sign In via the terminal to unlock the game.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset + 70, width, 30), centre);
+                g.DrawString("1. Step closer to the table to log in automatically.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset, width, 30), centre);
+                g.DrawString("2. Match the animals to their correct homes.", instrFont, Brushes.LightGray, new RectangleF(0, yOffset + 35, width, 30), centre);
+                g.DrawString("3. Raise an OPEN HAND to view the pause menu.", instrFont, Brushes.Gold, new RectangleF(0, yOffset + 70, width, 30), centre);
             }
 
-            // Draw cursor trails so the table feels "alive" even while locked
             DrawCursorTrails(g);
-
-            // Draw status bar at the bottom
             DrawStatusBar(g);
+        }
+
+        // --- NEW: Render the Hand Tracking Menu ---
+        private void DrawPieMenu(Graphics g)
+        {
+            // Dim the background while the menu is open
+            using (SolidBrush overlay = new SolidBrush(Color.FromArgb(200, 10, 10, 15)))
+                g.FillRectangle(overlay, 0, 0, width, height);
+
+            int cx = width / 2;
+            int cy = height / 2;
+            int baseRadius = 200;
+
+            // Draw the three slices. (Start Angle, Sweep Angle)
+            // C# angles start at 0 (Right) and go clockwise.
+            // Top Slice: Starts at 210, sweeps 120 (goes to 330)
+            DrawSlice(g, "Hint", "💡 Get Hint", 210, 120, cx, cy, baseRadius, Color.FromArgb(220, 180, 40));
+            // Right Slice: Starts at 330, sweeps 120 (goes to 90)
+            DrawSlice(g, "Logout", "🚪 Log Out", 330, 120, cx, cy, baseRadius, Color.FromArgb(200, 50, 60));
+            // Left Slice: Starts at 90, sweeps 120 (goes to 210)
+            DrawSlice(g, "Restart", "🔄 Restart", 90, 120, cx, cy, baseRadius, Color.FromArgb(50, 120, 200));
+
+            // Draw the donut hole in the center
+            int holeRadius = 65;
+            using (SolidBrush holeBrush = new SolidBrush(Color.FromArgb(20, 25, 45)))
+                g.FillEllipse(holeBrush, cx - holeRadius, cy - holeRadius, holeRadius * 2, holeRadius * 2);
+
+            // Draw instruction text in the middle
+            StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold))
+                g.DrawString("MAKE FIST\nTO SELECT", f, Brushes.LightGray, cx, cy, format);
+        }
+
+        private void DrawSlice(Graphics g, string sliceId, string label, float startAngle, float sweepAngle, int cx, int cy, int baseRadius, Color baseColor)
+        {
+            bool isHovered = (hoveredSlice == sliceId);
+
+            // Pop out the slice if hovered
+            int r = isHovered ? baseRadius + 30 : baseRadius;
+            Color c = isHovered ? ControlPaint.Light(baseColor, 0.3f) : baseColor;
+
+            Rectangle rect = new Rectangle(cx - r, cy - r, r * 2, r * 2);
+
+            using (SolidBrush brush = new SolidBrush(c))
+                g.FillPie(brush, rect, startAngle, sweepAngle);
+
+            using (Pen borderPen = new Pen(Color.FromArgb(15, 20, 50), 5))
+                g.DrawPie(borderPen, rect, startAngle, sweepAngle);
+
+            // Calculate exact center of the slice to draw the text
+            double rad = (startAngle + sweepAngle / 2) * Math.PI / 180.0;
+            float textX = cx + (float)(Math.Cos(rad) * (r * 0.65));
+            float textY = cy + (float)(Math.Sin(rad) * (r * 0.65));
+
+            StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            using (Font f = new Font("Segoe UI", 14f, FontStyle.Bold))
+                g.DrawString(label, f, Brushes.White, textX, textY, format);
         }
 
         private void DrawFeedbackBar(Graphics g)
@@ -537,8 +665,17 @@ namespace AnimalHomeGame_CSharp
                         g.FillRectangle(fb, rect);
                 }
 
-                using (Pen border = new Pen(Color.FromArgb(200, 255, 220, 80), 2))
-                    g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
+                // --- NEW: Give the target home a massive golden glow if HINT is active ---
+                if (hintedHome == def.name)
+                {
+                    using (Pen glow = new Pen(Color.Gold, 6))
+                        g.DrawRectangle(glow, rect.X - 3, rect.Y - 3, rect.Width + 6, rect.Height + 6);
+                }
+                else
+                {
+                    using (Pen border = new Pen(Color.FromArgb(200, 255, 220, 80), 2))
+                        g.DrawRectangle(border, rect.X, rect.Y, rect.Width, rect.Height);
+                }
 
                 RectangleF labelRect = new RectangleF(rect.X, rect.Y - 22, rect.Width, 20);
                 using (SolidBrush lbg = new SolidBrush(Color.FromArgb(140, 0, 0, 0)))
@@ -645,8 +782,7 @@ namespace AnimalHomeGame_CSharp
             string stats =
                 $"Objects: {objectList.Count}   Cursors: {cursorList.Count}   Blobs: {blobList.Count}"
                 + $"   |   Matched: {matched}/{AnimalDefs.Length}"
-                + $"   |   Verbose: {(verbose ? "ON" : "OFF")}"
-                + $"   |   F1 = Fullscreen   V = Verbose   Esc = Exit";
+                + $"   |   F1 = Full   V = Verbose   L = Log Out   Esc = Exit";
 
             g.DrawString(stats, smallFont, white, new PointF(10, height - 20));
         }
@@ -720,6 +856,22 @@ namespace AnimalHomeGame_CSharp
             }
 
             return null;
+        }
+
+        public void sendMessage(string message)
+        {
+            try
+            {
+                if (stream != null && client.Connected)
+                {
+                    byte[] sendBuffer = Encoding.UTF8.GetBytes(message);
+                    stream.Write(sendBuffer, 0, sendBuffer.Length);
+                }
+            }
+            catch (System.Exception e)
+            {
+                Console.WriteLine("Send error: " + e.Message);
+            }
         }
     }
 }
