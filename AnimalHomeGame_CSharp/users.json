@@ -1,0 +1,22 @@
+[
+  {
+    "PlayerName": "Galaxy Buds Pro (6FB9)",
+    "BluetoothDeviceId": "Bluetooth#Bluetooth10:a5:1d:59:52:7b-44:ea:30:57:6f:b9",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "Yahia\u0027s S21 FE",
+    "BluetoothDeviceId": "Bluetooth#Bluetooth10:a5:1d:59:52:7b-b0:4a:6a:ea:60:58",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "Jana\u2019s iPhone",
+    "BluetoothDeviceId": "Bluetooth#Bluetooth28:39:26:a5:1b:2c-10:30:25:09:fa:85",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "DualSense Wireless Controller",
+    "BluetoothDeviceId": "Bluetooth#Bluetooth28:39:26:a5:1b:2c-48:18:8d:e8:9a:f5",
+    "Role": "User"
+  }
+]
