@@ -5,6 +5,8 @@ using System.IO;
 using System.Windows.Forms;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Net;
 
@@ -15,10 +17,21 @@ public class GamePlayForm : Form
     private readonly UserProfile currentUser;
     private readonly MainForm parentScanner;
     private TuioHandler tuioHandler;
-    
+
+    // ── Emotion listener (unchanged) ──────────────────────────────────────
     private UdpClient? udpClient;
     private bool isListeningEmotions = false;
     private Label emotionLabel = null!;
+
+    // ── YOLO listener (NEW) ───────────────────────────────────────────────
+    private UdpClient? yoloUdpClient;
+    private bool isListeningYolo = false;
+
+    // ── Input-source tracking per animal (NEW) ────────────────────────────
+    // Stores the last source that grabbed each animal: "TUIO", "YOLO", or "Mouse"
+    private readonly Dictionary<int, string> animalInputSource = new();
+    // One small badge label per animal, keyed by tuioId
+    private readonly Dictionary<int, Label> inputSourceBadge = new();
 
     private const int LOGOUT_MARKER_ID = 5;
 
@@ -30,6 +43,7 @@ public class GamePlayForm : Form
 
     private Label feedbackLabel = null!;
     private Label debugLabel = null!;
+
     private static readonly (string name, int tuioId, string image, string home)[] AnimalDefs =
     {
         ("Bird",  0, "bird.jpeg",  "Nest"),
@@ -55,6 +69,7 @@ public class GamePlayForm : Form
         SetupGUI();
         SetupTuio();
         SetupEmotionListener();
+        SetupYoloListener(); // NEW
     }
 
     private void SetupGUI()
@@ -128,14 +143,13 @@ public class GamePlayForm : Form
         };
         this.Controls.Add(emotionLabel);
 
-        int count = AnimalDefs.Length;
+        int count    = AnimalDefs.Length;
         int itemHeight = 100;
         int itemWidth  = 110;
-        int startY = 100;
+        int startY   = 100;
         int spacingY = 130;
-
-        int leftX  = 40;
-        int rightX = 860;
+        int leftX    = 40;
+        int rightX   = 860;
 
         for (int i = 0; i < count; i++)
         {
@@ -188,6 +202,26 @@ public class GamePlayForm : Form
             this.Controls.Add(animalPic);
             animalPic.BringToFront();
             animalLabel.BringToFront();
+
+            // ── NEW: input-source badge ───────────────────────────────────
+            // Small pill rendered just below each animal picture.
+            // Hidden until an input source grabs the animal.
+            Label badge = new Label
+            {
+                Text = "",
+                Font = new Font("Segoe UI", 7, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(180, 40, 40, 40),
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Size = new Size(itemWidth, 16),
+                Location = new Point(leftX, y + itemHeight + 2),
+                Visible = false
+            };
+            this.Controls.Add(badge);
+            badge.BringToFront();
+            inputSourceBadge[tuioId] = badge;
+            // ─────────────────────────────────────────────────────────────
         }
 
         for (int i = 0; i < HomeDefs.Length; i++)
@@ -240,6 +274,35 @@ public class GamePlayForm : Form
         emotionLabel.BringToFront();
     }
 
+    // ── Input-source badge helpers (NEW) ──────────────────────────────────
+    private void SetInputSourceBadge(int tuioId, string source)
+    {
+        if (!inputSourceBadge.TryGetValue(tuioId, out Label? badge)) return;
+
+        animalInputSource[tuioId] = source;
+
+        Color bg = source switch
+        {
+            "TUIO"  => Color.FromArgb(200, 30,  100, 200),  // blue
+            "YOLO"  => Color.FromArgb(200, 30,  160,  60),  // green
+            "Mouse" => Color.FromArgb(200, 160,  80,  20),  // orange
+            _       => Color.FromArgb(180,  40,  40,  40)
+        };
+
+        badge.Text    = $"via {source}";
+        badge.BackColor = bg;
+        badge.Visible = true;
+    }
+
+    private void ClearInputSourceBadge(int tuioId)
+    {
+        if (!inputSourceBadge.TryGetValue(tuioId, out Label? badge)) return;
+        animalInputSource.Remove(tuioId);
+        badge.Text    = "";
+        badge.Visible = false;
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     private void SetupTuio()
     {
         tuioHandler.OnObjectAdded   += HandleTuioAdded;
@@ -286,8 +349,7 @@ public class GamePlayForm : Form
     private void HandleEmotionReceived(string emotion)
     {
         emotionLabel.Text = $"Emotion: {emotion}";
-        
-        // Give a hint if sad or angry, and rate-limit to avoid spamming
+
         if ((emotion == "sad" || emotion == "angry") && (DateTime.Now - lastHintTime).TotalSeconds > 5)
         {
             ShowFeedback($"Hey! Don't be {emotion}! Here's a hint: Check the animals' environments!", Color.Orange);
@@ -296,11 +358,85 @@ public class GamePlayForm : Form
         }
         else if (emotion == "happy" && (DateTime.Now - lastHintTime).TotalSeconds > 5)
         {
-             ShowFeedback($"Glad to see you smiling! Keep up the good work!", Color.HotPink);
-             lastHintTime = DateTime.Now;
-             lastHintEmotion = "happy";
+            ShowFeedback($"Glad to see you smiling! Keep up the good work!", Color.HotPink);
+            lastHintTime = DateTime.Now;
+            lastHintEmotion = "happy";
         }
     }
+
+    // ── YOLO listener (NEW) ───────────────────────────────────────────────
+    private void SetupYoloListener()
+    {
+        try
+        {
+            yoloUdpClient = new UdpClient(5006);
+            isListeningYolo = true;
+            Task.Run(() => ListenForYolo());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Could not start YOLO listener: " + ex.Message);
+        }
+    }
+
+    private void ListenForYolo()
+    {
+        IPEndPoint ep = new IPEndPoint(IPAddress.Any, 5006);
+        while (isListeningYolo)
+        {
+            try
+            {
+                byte[] bytes = yoloUdpClient!.Receive(ref ep);
+                string json  = Encoding.UTF8.GetString(bytes);
+                YoloMessage? msg = JsonSerializer.Deserialize<YoloMessage>(json);
+                if (msg == null) continue;
+
+                SafeInvoke(() =>
+                {
+                    debugLabel.Text = $"YOLO: {msg.Event} id={msg.Id} x={msg.X:F2} y={msg.Y:F2}";
+                    switch (msg.Event)
+                    {
+                        case "added":   HandleYoloAdded(msg.Id, msg.X, msg.Y);   break;
+                        case "update":  HandleYoloUpdated(msg.Id, msg.X, msg.Y); break;
+                        case "removed": HandleYoloRemoved(msg.Id, msg.X, msg.Y); break;
+                    }
+                });
+            }
+            catch { break; }
+        }
+    }
+
+    private void HandleYoloAdded(int animalId, float normX, float normY)
+    {
+        if (!animalById.TryGetValue(animalId, out GameItem? animal)) return;
+        if (animal.IsMatched) return;
+        // Don't hijack if TUIO already has this animal
+        if (grabbedAnimals.ContainsKey(animalId) &&
+            animalInputSource.TryGetValue(animalId, out string? src) && src == "TUIO") return;
+
+        grabbedAnimals[animalId] = animal;
+        animal.Picture.BorderStyle = BorderStyle.Fixed3D;
+        MoveAnimalToMarker(animal, normX, normY);
+        SetInputSourceBadge(animalId, "YOLO");
+        ShowFeedback($"YOLO detected {animal.Name}! Move it to its home!", Color.LimeGreen);
+    }
+
+    private void HandleYoloUpdated(int animalId, float normX, float normY)
+    {
+        if (!grabbedAnimals.TryGetValue(animalId, out GameItem? animal)) return;
+        if (animalInputSource.TryGetValue(animalId, out string? src) && src != "YOLO") return;
+        MoveAnimalToMarker(animal, normX, normY);
+    }
+
+    private void HandleYoloRemoved(int animalId, float normX, float normY)
+    {
+        if (!grabbedAnimals.TryGetValue(animalId, out GameItem? animal)) return;
+        if (animalInputSource.TryGetValue(animalId, out string? src) && src != "YOLO") return;
+        grabbedAnimals.Remove(animalId);
+        ClearInputSourceBadge(animalId);
+        TrySnapOrReturn(animal);
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     private void HandleTuioAdded(int symbolId, float normX, float normY)
     {
@@ -339,6 +475,7 @@ public class GamePlayForm : Form
             grabbedAnimals[symbolId] = animal;
             animal.Picture.BorderStyle = BorderStyle.Fixed3D;
             MoveAnimalToMarker(animal, normX, normY);
+            SetInputSourceBadge(symbolId, "TUIO"); // NEW
             ShowFeedback($"✅ Marker #{symbolId} grabbed {animal.Name}. Move it to its home!", Color.DarkGreen);
         });
     }
@@ -348,7 +485,6 @@ public class GamePlayForm : Form
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Move ID={symbolId}  x={normX:F2} y={normY:F2}";
-
             if (!grabbedAnimals.TryGetValue(symbolId, out GameItem? animal)) return;
             MoveAnimalToMarker(animal, normX, normY);
         });
@@ -359,9 +495,9 @@ public class GamePlayForm : Form
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Removed ID={symbolId}";
-
             if (!grabbedAnimals.TryGetValue(symbolId, out GameItem? animal)) return;
             grabbedAnimals.Remove(symbolId);
+            ClearInputSourceBadge(symbolId); // NEW
             TrySnapOrReturn(animal);
         });
     }
@@ -393,6 +529,7 @@ public class GamePlayForm : Form
         mouseDragItem = animal;
         mouseOffset = new Point(e.X, e.Y);
         animal.Picture.BringToFront();
+        SetInputSourceBadge(animal.TuioId, "Mouse"); // NEW
         ShowFeedback($"[Mouse] Dragging {animal.Name}…", Color.White);
     }
 
@@ -409,6 +546,7 @@ public class GamePlayForm : Form
         if (mouseDragItem == null) return;
         var animal = mouseDragItem;
         mouseDragItem = null;
+        ClearInputSourceBadge(animal.TuioId); // NEW
         TrySnapOrReturn(animal);
     }
 
@@ -423,6 +561,7 @@ public class GamePlayForm : Form
                     home.Picture.Left + (home.Picture.Width  - animal.Picture.Width)  / 2,
                     home.Picture.Top  + (home.Picture.Height - animal.Picture.Height) / 2);
                 animal.IsMatched = true;
+                ClearInputSourceBadge(animal.TuioId); // NEW — hide badge when matched
                 ShowFeedback($"🎉 {animal.Name} is home!", Color.Gold);
                 CheckWinCondition();
                 return;
@@ -448,7 +587,7 @@ public class GamePlayForm : Form
         {
             feedbackLabel.Text = "🏆 All animals are home! You win!";
             feedbackLabel.BackColor = Color.FromArgb(200, 20, 120, 20);
-            MessageBox.Show("🎉 Congratulations! All animals found their homes!", "You Win!", 
+            MessageBox.Show("🎉 Congratulations! All animals found their homes!", "You Win!",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
@@ -487,7 +626,10 @@ public class GamePlayForm : Form
     {
         isListeningEmotions = false;
         udpClient?.Close();
-        
+
+        isListeningYolo = false;   // NEW
+        yoloUdpClient?.Close();    // NEW
+
         tuioHandler.Stop();
         tuioHandler.Dispose();
 
@@ -517,4 +659,12 @@ public class GamePlayForm : Form
         this.Name = "GamePlayForm";
         this.ResumeLayout(false);
     }
+
+    // ── YOLO message DTO (NEW) ────────────────────────────────────────────
+    private record YoloMessage(
+        [property: JsonPropertyName("event")] string Event,
+        [property: JsonPropertyName("id")]    int    Id,
+        [property: JsonPropertyName("x")]     float  X,
+        [property: JsonPropertyName("y")]     float  Y
+    );
 }

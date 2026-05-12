@@ -18,5 +18,15 @@
     "PlayerName": "DualSense Wireless Controller",
     "BluetoothDeviceId": "Bluetooth#Bluetooth28:39:26:a5:1b:2c-48:18:8d:e8:9a:f5",
     "Role": "User"
+  },
+  {
+    "PlayerName": "D3DS3C",
+    "BluetoothDeviceId": "Bluetooth#Bluetootha0:a8:cd:33:69:d0-64:d0:d6:1b:2f:cf",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "JBL GO 2",
+    "BluetoothDeviceId": "Bluetooth#Bluetootha0:a8:cd:33:69:d0-f8:5c:7d:6e:6f:2a",
+    "Role": "User"
   }
 ]
