@@ -24,7 +24,18 @@ namespace AnimalHomeGame_CSharp
         private TuioClient client;
         private Client socketClient;
 
-        // --- NEW MENU STATE VARIABLES ---
+       
+
+
+
+
+
+
+
+
+
+
+
         private bool isMenuOpen = false;
         private string hoveredSlice = "";
         private string hintedHome = ""; // Tracks which home should glow
@@ -145,7 +156,6 @@ namespace AnimalHomeGame_CSharp
                     else if (!string.IsNullOrEmpty(msg))
                     {
                         this.Invoke(new Action(() => {
-                            // Split by newline in case Python sends multiple messages at the exact same millisecond
                             string[] commands = msg.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
                             foreach (string cmd in commands)
@@ -159,7 +169,7 @@ namespace AnimalHomeGame_CSharp
             }
         }
 
-        // --- NEW: Parses the logic from Python ---
+      
         private void ProcessSocketCommand(string cmd)
         {
             if (cmd.StartsWith("LOGIN:"))
@@ -192,7 +202,7 @@ namespace AnimalHomeGame_CSharp
             }
         }
 
-        // --- NEW: Action Methods ---
+      
         private void ResetGame()
         {
             foreach (var def in AnimalDefs)
@@ -506,7 +516,7 @@ namespace AnimalHomeGame_CSharp
                 DrawCursorTrails(g);
                 DrawStatusBar(g);
 
-                // --- NEW: Draw the Menu ON TOP of everything if it's open ---
+              
                 if (isMenuOpen)
                 {
                     DrawPieMenu(g);
@@ -557,21 +567,16 @@ namespace AnimalHomeGame_CSharp
             int cy = height / 2;
             int baseRadius = 200;
 
-            // Draw the three slices. (Start Angle, Sweep Angle)
-            // C# angles start at 0 (Right) and go clockwise.
-            // Top Slice: Starts at 210, sweeps 120 (goes to 330)
             DrawSlice(g, "Hint", "💡 Get Hint", 210, 120, cx, cy, baseRadius, Color.FromArgb(220, 180, 40));
-            // Right Slice: Starts at 330, sweeps 120 (goes to 90)
             DrawSlice(g, "Logout", "🚪 Log Out", 330, 120, cx, cy, baseRadius, Color.FromArgb(200, 50, 60));
-            // Left Slice: Starts at 90, sweeps 120 (goes to 210)
             DrawSlice(g, "Restart", "🔄 Restart", 90, 120, cx, cy, baseRadius, Color.FromArgb(50, 120, 200));
 
-            // Draw the donut hole in the center
+       
             int holeRadius = 65;
             using (SolidBrush holeBrush = new SolidBrush(Color.FromArgb(20, 25, 45)))
                 g.FillEllipse(holeBrush, cx - holeRadius, cy - holeRadius, holeRadius * 2, holeRadius * 2);
 
-            // Draw instruction text in the middle
+            
             StringFormat format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold))
                 g.DrawString("MAKE FIST\nTO SELECT", f, Brushes.LightGray, cx, cy, format);
