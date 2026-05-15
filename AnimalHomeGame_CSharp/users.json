@@ -28,5 +28,30 @@
     "PlayerName": "JBL GO 2",
     "BluetoothDeviceId": "Bluetooth#Bluetootha0:a8:cd:33:69:d0-f8:5c:7d:6e:6f:2a",
     "Role": "User"
+  },
+  {
+    "PlayerName": "User_1",
+    "BluetoothDeviceId": "FACE_ID_User_1",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "User_5",
+    "BluetoothDeviceId": "FACE_ID_User_5",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "User_4",
+    "BluetoothDeviceId": "FACE_ID_User_4",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "User_2",
+    "BluetoothDeviceId": "FACE_ID_User_2",
+    "Role": "User"
+  },
+  {
+    "PlayerName": "User_3",
+    "BluetoothDeviceId": "FACE_ID_User_3",
+    "Role": "User"
   }
 ]

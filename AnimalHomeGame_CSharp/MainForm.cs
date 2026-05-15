@@ -2,9 +2,11 @@ using System;
 using System.Drawing;
 using System.Collections.Generic;
 using System.Linq;
-using Windows.Devices.Bluetooth;
-using Windows.Devices.Enumeration;
 using System.Windows.Forms;
+using System.Net.Sockets;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace AnimalHomeGame_CSharp;
 
@@ -12,26 +14,28 @@ public partial class MainForm : Form
 {
     private Label statusLabel;
     private Label instructionsLabel;
-    private DeviceWatcher deviceWatcher;
     private bool isAuthenticated = false;
+    private UdpClient? udpClient;
+    private bool isListening = false;
 
     public MainForm()
     {
         InitializeComponent();
         SetupGUI();
-        SetupBluetoothWatcher();
+        SetupFaceRecognitionListener();
     }
 
     private void SetupGUI()
     {
-        this.Text = "Animal Home Game - Authentication";
+        this.Text = "Animal Home Game - Face Login";
         this.Size = new Size(800, 600);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.BackColor = Color.WhiteSmoke;
+        this.FormClosed += MainForm_FormClosed;
 
         statusLabel = new Label 
         { 
-            Text = "Scanning for your Bluetooth device...", 
+            Text = "Waiting for Face Recognition...", 
             Font = new Font("Segoe UI", 20, FontStyle.Bold), 
             ForeColor = Color.DimGray, 
             AutoSize = false, 
@@ -43,7 +47,7 @@ public partial class MainForm : Form
 
         instructionsLabel = new Label
         {
-            Text = "How it works:\n\n1. Make sure your phone or device's Bluetooth is turned ON and is 'Discoverable'.\n2. Keep your device nearby.\n3. We will automatically detect you!\n\nIf you are new, we will instantly create your profile.\nIf you are returning, you will be logged right in.",
+            Text = "How it works:\n\n1. Ensure the Python AI Vision script is running.\n2. Look at the camera.\n3. We will automatically detect your face and log you in!\n\nIf you are new, a profile will be created for you automatically.",
             Font = new Font("Segoe UI", 12, FontStyle.Regular),
             ForeColor = Color.DarkSlateGray,
             AutoSize = false,
@@ -56,50 +60,60 @@ public partial class MainForm : Form
         this.Controls.Add(statusLabel);
     }
 
-    private void SetupBluetoothWatcher()
+    private void SetupFaceRecognitionListener()
     {
-        string[] requestedProperties = { "System.ItemNameDisplay", "System.Devices.Aep.DeviceAddress", "System.Devices.Aep.IsConnected" };
-        
-        deviceWatcher = DeviceInformation.CreateWatcher(
-            "(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\")",
-            requestedProperties,
-            DeviceInformationKind.AssociationEndpoint);
-
-        deviceWatcher.Added += DeviceWatcher_Added;
-        deviceWatcher.Start();
+        try
+        {
+            udpClient = new UdpClient(5008);
+            isListening = true;
+            Task.Run(() => ListenForFaces());
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Could not start face listener: " + ex.Message);
+        }
     }
 
-    private void DeviceWatcher_Added(DeviceWatcher sender, DeviceInformation deviceInfo)
+    private void ListenForFaces()
     {
-        if (isAuthenticated) return;
-        if (string.IsNullOrWhiteSpace(deviceInfo.Name)) return;
-
-        lock (this)
+        IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, 5008);
+        while (isListening)
         {
-            if (isAuthenticated) return;
-            isAuthenticated = true;
-            
-            if (deviceWatcher.Status == DeviceWatcherStatus.Started)
+            try
             {
-                deviceWatcher.Stop();
+                byte[] bytes = udpClient!.Receive(ref endPoint);
+                string message = Encoding.UTF8.GetString(bytes);
+                if (message.StartsWith("LOGIN:"))
+                {
+                    string username = message.Substring(6);
+                    SafeInvoke(() => ProcessLogin(username));
+                }
+            }
+            catch
+            {
+                break;
             }
         }
-
-        if (this.InvokeRequired)
-        {
-            this.Invoke(new Action(() => AuthenticateDevice(deviceInfo)));
-        }
-        else
-        {
-            AuthenticateDevice(deviceInfo);
-        }
     }
 
-    private void AuthenticateDevice(DeviceInformation deviceInfo)
+    private void SafeInvoke(Action action)
     {
+        if (this.IsDisposed || !this.IsHandleCreated) return;
+        if (this.InvokeRequired)
+            this.Invoke(action);
+        else
+            action();
+    }
+
+    private void ProcessLogin(string username)
+    {
+        if (isAuthenticated) return;
+        isAuthenticated = true;
+
         List<UserProfile> profiles = ProfileManager.LoadProfiles();
         
-        UserProfile? existingProfile = profiles.FirstOrDefault(p => p.BluetoothDeviceId == deviceInfo.Id);
+        // We'll use the Username as the ID since we dropped Bluetooth
+        UserProfile? existingProfile = profiles.FirstOrDefault(p => p.PlayerName == username);
 
         UserProfile activeProfile = null;
 
@@ -107,7 +121,7 @@ public partial class MainForm : Form
         {
             activeProfile = existingProfile;
             statusLabel.Text = $"Welcome back, {existingProfile.PlayerName}!";
-            instructionsLabel.Text = $"Automatic Sign-In Successful.\nYour Role: {existingProfile.Role}\n\nGetting everything ready for you...";
+            instructionsLabel.Text = $"Face Recognized.\nYour Role: {existingProfile.Role}\n\nGetting everything ready for you...";
             statusLabel.ForeColor = Color.Green;
             instructionsLabel.ForeColor = Color.Black;
         }
@@ -117,8 +131,8 @@ public partial class MainForm : Form
             
             UserProfile newProfile = new UserProfile 
             {
-                PlayerName = deviceInfo.Name,
-                BluetoothDeviceId = deviceInfo.Id,
+                PlayerName = username,
+                BluetoothDeviceId = "FACE_ID_" + username, // Keep field populated to avoid breaking existing serialization
                 Role = newRole
             };
             
@@ -127,16 +141,15 @@ public partial class MainForm : Form
 
             activeProfile = newProfile;
             statusLabel.Text = $"Account Created for {newProfile.PlayerName}!";
-            instructionsLabel.Text = $"Automatic Sign-Up Successful.\nYour Role: {newProfile.Role}\n\nGetting everything ready for you...";
+            instructionsLabel.Text = $"New Face Registered.\nYour Role: {newProfile.Role}\n\nGetting everything ready for you...";
             statusLabel.ForeColor = Color.Blue;
             instructionsLabel.ForeColor = Color.Black;
         }
         
-        System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 3000 };
+        System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 2000 };
         timer.Tick += (s, args) => 
         {
             timer.Stop();
-            
             GameForm gameMenuForm = new GameForm(activeProfile, this);
             gameMenuForm.Show();
             this.Hide();
@@ -147,15 +160,15 @@ public partial class MainForm : Form
     public void ResetScanner()
     {
         isAuthenticated = false;
-        
-        statusLabel.Text = "Scanning for your Bluetooth device...";
+        statusLabel.Text = "Waiting for Face Recognition...";
         statusLabel.ForeColor = Color.DimGray;
-        instructionsLabel.Text = "How it works:\n\n1. Make sure your phone or device's Bluetooth is turned ON and is 'Discoverable'.\n2. Keep your device nearby.\n3. We will automatically detect you!\n\nIf you are new, we will instantly create your profile.\nIf you are returning, you will be logged right in.";
+        instructionsLabel.Text = "How it works:\n\n1. Ensure the Python AI Vision script is running.\n2. Look at the camera.\n3. We will automatically detect your face and log you in!\n\nIf you are new, a profile will be created for you automatically.";
         instructionsLabel.ForeColor = Color.DarkSlateGray;
+    }
 
-        if (deviceWatcher != null && deviceWatcher.Status != DeviceWatcherStatus.Started)
-        {
-            deviceWatcher.Start();
-        }
+    private void MainForm_FormClosed(object? sender, FormClosedEventArgs e)
+    {
+        isListening = false;
+        udpClient?.Close();
     }
 }

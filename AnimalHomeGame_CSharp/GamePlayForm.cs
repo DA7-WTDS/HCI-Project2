@@ -23,6 +23,10 @@ public class GamePlayForm : Form
     private bool isListeningEmotions = false;
     private Label emotionLabel = null!;
 
+    // ── Hand Menu listener (NEW) ──────────────────────────────────────────
+    private UdpClient? handMenuUdpClient;
+    private bool isListeningHandMenu = false;
+
     // ── YOLO listener (NEW) ───────────────────────────────────────────────
     private UdpClient? yoloUdpClient;
     private bool isListeningYolo = false;
@@ -70,6 +74,7 @@ public class GamePlayForm : Form
         SetupTuio();
         SetupEmotionListener();
         SetupYoloListener(); // NEW
+        SetupHandMenuListener(); // NEW Hand Menu
     }
 
     private void SetupGUI()
@@ -438,6 +443,82 @@ public class GamePlayForm : Form
     }
     // ─────────────────────────────────────────────────────────────────────
 
+    // ── Hand Menu listener (NEW) ──────────────────────────────────────────
+    private void SetupHandMenuListener()
+    {
+        try
+        {
+            handMenuUdpClient = new UdpClient(5007);
+            isListeningHandMenu = true;
+            Task.Run(() => ListenForHandMenu());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Could not start Hand Menu listener: " + ex.Message);
+        }
+    }
+
+    private void ListenForHandMenu()
+    {
+        IPEndPoint ep = new IPEndPoint(IPAddress.Any, 5007);
+        while (isListeningHandMenu)
+        {
+            try
+            {
+                byte[] bytes = handMenuUdpClient!.Receive(ref ep);
+                string command = Encoding.UTF8.GetString(bytes);
+
+                SafeInvoke(() =>
+                {
+                    if (command.StartsWith("SELECT:"))
+                    {
+                        string action = command.Substring(7);
+                        HandleHandMenuAction(action);
+                    }
+                    else if (command.StartsWith("HOVER:"))
+                    {
+                        string action = command.Substring(6);
+                        ShowFeedback($"Hand Menu: Hovering over {action}...", Color.LightBlue);
+                    }
+                    else if (command.StartsWith("OPEN_MENU:"))
+                    {
+                        ShowFeedback("Hand Menu Opened! Make a fist to select.", Color.Cyan);
+                    }
+                });
+            }
+            catch { break; }
+        }
+    }
+
+    private void HandleHandMenuAction(string action)
+    {
+        if (action == "Hint")
+        {
+            ShowFeedback("Hint: Check the environments to find where each animal belongs!", Color.Gold);
+        }
+        else if (action == "Restart")
+        {
+            foreach (var animal in animalById.Values)
+            {
+                animal.IsMatched = false;
+                animal.Picture.BorderStyle = BorderStyle.FixedSingle;
+                ReturnToOrigin(animal);
+            }
+            grabbedAnimals.Clear();
+            animalInputSource.Clear();
+            foreach (var badge in inputSourceBadge.Values) { badge.Visible = false; badge.Text = ""; }
+            ShowFeedback("Game Restarted via Hand Menu!", Color.Orange);
+        }
+        else if (action == "Logout")
+        {
+            ShowFeedback("Logging out via Hand Menu...", Color.DodgerBlue);
+            var logoutTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+            logoutTimer.Tick += (s, e) => { logoutTimer.Stop(); this.Close(); };
+            logoutTimer.Start();
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     private void HandleTuioAdded(int symbolId, float normX, float normY)
     {
         SafeInvoke(() =>
@@ -629,6 +710,9 @@ public class GamePlayForm : Form
 
         isListeningYolo = false;   // NEW
         yoloUdpClient?.Close();    // NEW
+
+        isListeningHandMenu = false;
+        handMenuUdpClient?.Close();
 
         tuioHandler.Stop();
         tuioHandler.Dispose();
