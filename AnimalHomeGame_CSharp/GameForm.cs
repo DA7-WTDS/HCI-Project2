@@ -1,6 +1,11 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
 
 namespace AnimalHomeGame_CSharp;
 
@@ -9,7 +14,8 @@ public partial class GameForm : Form
     private UserProfile currentUser;
     private TuioHandler tuioHandler;
     private MainForm mainFormReference;
-
+private UdpClient? playUdpClient;
+ private bool isListeningPlay = false;
     public GameForm(UserProfile profile, MainForm mf = null)
     {
         this.currentUser = profile;
@@ -17,8 +23,57 @@ public partial class GameForm : Form
         InitializeComponent();
         SetupGUI();
         SetupTuio();
+        SetupPlayListener();
+    }
+  private void SetupPlayListener()
+    {
+        try
+        {
+            playUdpClient = new UdpClient(5009);
+            isListeningPlay = true;
+            Task.Run(() => ListenForPlay());
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Could not start play listener: " + ex.Message);
+        }
     }
 
+    private void ListenForPlay()
+    {
+        IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, 5009);
+        while (isListeningPlay)
+        {
+            try
+            {
+                byte[] bytes = playUdpClient!.Receive(ref endPoint);
+                string message = Encoding.UTF8.GetString(bytes);
+                if (message.Trim() == "PLAY")
+                {
+                    if (this.IsDisposed || !this.IsHandleCreated) continue;
+                    this.Invoke(new Action(() =>
+                    {
+                        MainForm? mainForm = null;
+                        foreach (Form f in Application.OpenForms)
+                            if (f is MainForm mf) { mainForm = mf; break; }
+
+                        if (mainForm != null)
+                        {
+                            isListeningPlay = false;
+                            playUdpClient?.Close();
+                            GamePlayForm gamePlay = new GamePlayForm(currentUser, mainForm);
+                            gamePlay.Show();
+                            this.Hide();
+                        }
+                    }));
+                }
+            }
+            catch
+            {
+                break;
+            }
+        }
+    }
     private void SetupTuio()
     {
         tuioHandler = new TuioHandler();
@@ -173,7 +228,8 @@ public partial class GameForm : Form
     }
 
     private void GameForm_FormClosed(object? sender, FormClosedEventArgs e)
-    {
+    {   isListeningPlay = false;
+        playUdpClient?.Close();
         tuioHandler?.Stop();
         tuioHandler?.Dispose();
 
