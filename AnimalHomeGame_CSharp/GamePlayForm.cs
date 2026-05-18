@@ -34,6 +34,13 @@ public class GamePlayForm : Form
     private bool gazeHighlightActive = false;   // are highlights currently on?
     private static readonly Color GazeHighlightColor = Color.Yellow;
 
+    // ── Gaze heatmap ─────────────────────────────────────────────────────
+    // Downscaled 4x relative to the 1024×768 client area → 256×192 cells
+    private const int HeatW = 256;
+    private const int HeatH = 192;
+    private readonly float[,] gazeHeat = new float[HeatW, HeatH];
+    private float gazeHeatMax = 1f;  // running max for normalisation
+
     // ── Hand Menu listener ────────────────────────────────────────────────
     private UdpClient? handMenuUdpClient;
     private bool isListeningHandMenu = false;
@@ -506,8 +513,11 @@ public class GamePlayForm : Form
     {
         string emotion = "none";
         string prevGaze = currentGaze;
+        float gazeX = 0.5f, gazeY = 0.5f;
+        bool hasGazeXY = false;
 
-        // Parse structured payload: EMOTION:happy|GAZE:Left|LIGHTING:bright
+        // Parse structured payload:
+        // EMOTION:happy|GAZE:Left|GAZE_X:0.71|GAZE_Y:0.48|LIGHTING:bright
         foreach (var part in message.Split('|'))
         {
             var kv = part.Split(':', 2);
@@ -517,8 +527,22 @@ public class GamePlayForm : Form
                 case "EMOTION":  emotion = kv[1].ToLower(); break;
                 case "GAZE":     currentGaze = kv[1]; break;
                 case "LIGHTING": currentLighting = kv[1]; break;
+                case "GAZE_X":
+                    if (float.TryParse(kv[1], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float gx))
+                    { gazeX = gx; hasGazeXY = true; }
+                    break;
+                case "GAZE_Y":
+                    if (float.TryParse(kv[1], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float gy))
+                    { gazeY = gy; }
+                    break;
             }
         }
+
+        // Accumulate gaze into heatmap buffer
+        if (hasGazeXY)
+            AccumulateGaze(gazeX, gazeY);
 
         // Update UI labels
         emotionLabel.Text  = $"Emotion: {emotion}";
@@ -553,6 +577,163 @@ public class GamePlayForm : Form
             lastHintTime = DateTime.Now;
             lastHintEmotion = "happy";
         }
+    }
+
+    // ── Gaze heatmap accumulation ──────────────────────────────────────────
+    /// <summary>
+    /// Adds a Gaussian "splash" centred on the normalised gaze position.
+    /// gazeX: 0=right edge, 1=left edge (iris convention) → flipped to screen.
+    /// gazeY: 0=top, 1=bottom (nose-tip Y).
+    /// </summary>
+    private void AccumulateGaze(float gazeX, float gazeY)
+    {
+        // Iris ratio is mirrored: high ratio = user looking left = screen left.
+        // Flip X so heatmap X maps naturally to screen X.
+        float sx = 1f - gazeX;   // screen-normalised X
+        float sy = gazeY;        // screen-normalised Y
+
+        // Centre in the heatmap grid
+        int cx = (int)(sx * (HeatW - 1));
+        int cy = (int)(sy * (HeatH - 1));
+
+        // Gaussian radius in heatmap cells (~10% of width)
+        const float sigma = HeatW * 0.08f;
+        int radius = (int)(sigma * 3);
+        int x0 = Math.Max(0, cx - radius);
+        int x1 = Math.Min(HeatW - 1, cx + radius);
+        int y0 = Math.Max(0, cy - radius);
+        int y1 = Math.Min(HeatH - 1, cy + radius);
+
+        for (int x = x0; x <= x1; x++)
+        {
+            for (int y = y0; y <= y1; y++)
+            {
+                float dx = x - cx, dy = y - cy;
+                float v = (float)Math.Exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+                gazeHeat[x, y] += v;
+                if (gazeHeat[x, y] > gazeHeatMax)
+                    gazeHeatMax = gazeHeat[x, y];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Renders the accumulated heatmap onto a screenshot of the game form
+    /// and saves the result as a PNG to Desktop\GazeHeatmaps.
+    /// </summary>
+    private void SaveGazeHeatmap()
+    {
+        try
+        {
+            // ─ 1. Screenshot of the game form ──────────────────────────────
+            int fw = this.ClientSize.Width;
+            int fh = this.ClientSize.Height;
+            using var screenshot = new Bitmap(fw, fh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            this.DrawToBitmap(screenshot, new Rectangle(0, 0, fw, fh));
+
+            // ─ 2. Render heatmap cells to full-res overlay ───────────────────
+            using var heatLayer = new Bitmap(fw, fh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(heatLayer))
+            {
+                g.Clear(Color.Transparent);
+                float cellW = (float)fw / HeatW;
+                float cellH = (float)fh / HeatH;
+
+                for (int x = 0; x < HeatW; x++)
+                {
+                    for (int y = 0; y < HeatH; y++)
+                    {
+                        float norm = gazeHeat[x, y] / gazeHeatMax;   // 0–1
+                        if (norm < 0.01f) continue;
+
+                        Color col = HeatColor(norm);
+                        // Alpha proportional to intensity, capped at 200
+                        int alpha = (int)(norm * 200);
+                        using var brush = new SolidBrush(Color.FromArgb(alpha, col));
+                        g.FillRectangle(brush,
+                            x * cellW, y * cellH,
+                            cellW + 1, cellH + 1);
+                    }
+                }
+            }
+
+            // ─ 3. Composite screenshot + heat layer ────────────────────────
+            using var composite = new Bitmap(fw, fh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(composite))
+            {
+                g.DrawImage(screenshot, 0, 0);
+                g.DrawImage(heatLayer,  0, 0);
+
+                // ─ Legend bar (bottom strip) ──────────────────────────────
+                int legW = 200, legH = 18, legX = fw - legW - 10, legY = fh - 28;
+                for (int i = 0; i < legW; i++)
+                {
+                    float t = (float)i / legW;
+                    using var b = new SolidBrush(HeatColor(t));
+                    g.FillRectangle(b, legX + i, legY, 1, legH);
+                }
+                using var legPen = new Pen(Color.White, 1);
+                g.DrawRectangle(legPen, legX, legY, legW, legH);
+                using var legFont = new Font("Segoe UI", 8);
+                using var legBrush = new SolidBrush(Color.White);
+                g.DrawString("Low", legFont, legBrush, legX - 28, legY);
+                g.DrawString("High", legFont, legBrush, legX + legW + 3, legY);
+                g.DrawString("Gaze Heatmap", legFont, legBrush, legX + legW / 2 - 35, legY - 14);
+
+                // ─ Timestamp + username watermark ──────────────────────────
+                string stamp = $"{currentUser.PlayerName}  {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
+                using var stFont = new Font("Segoe UI", 9, FontStyle.Bold);
+                using var stBrush = new SolidBrush(Color.FromArgb(220, Color.White));
+                g.DrawString(stamp, stFont, stBrush, 8, fh - 20);
+            }
+
+            // ─ 4. Save PNG ───────────────────────────────────────────────
+            string desktop  = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string saveDir  = Path.Combine(desktop, "GazeHeatmaps");
+            Directory.CreateDirectory(saveDir);
+
+            string safeUser = string.Concat(currentUser.PlayerName.Split(Path.GetInvalidFileNameChars()));
+            string fileName = $"gaze_{safeUser}_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+            string filePath = Path.Combine(saveDir, fileName);
+
+            composite.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
+            ShowFeedback($"📅 Heatmap saved → GazeHeatmaps\\{fileName}", Color.DeepSkyBlue);
+        }
+        catch (Exception ex)
+        {
+            ShowFeedback($"Heatmap save failed: {ex.Message}", Color.OrangeRed);
+        }
+    }
+
+    /// <summary>
+    /// Maps a normalised intensity (0–1) to a blue→cyan→green→yellow→red gradient.
+    /// </summary>
+    private static Color HeatColor(float t)
+    {
+        // 4 stops: 0=blue, 0.33=cyan, 0.66=yellow, 1=red
+        t = Math.Max(0f, Math.Min(1f, t));
+        int r, gv, b;
+        if (t < 0.25f)
+        {
+            float s = t / 0.25f;
+            r = 0; gv = (int)(s * 255); b = 255;
+        }
+        else if (t < 0.5f)
+        {
+            float s = (t - 0.25f) / 0.25f;
+            r = 0; gv = 255; b = (int)((1 - s) * 255);
+        }
+        else if (t < 0.75f)
+        {
+            float s = (t - 0.5f) / 0.25f;
+            r = (int)(s * 255); gv = 255; b = 0;
+        }
+        else
+        {
+            float s = (t - 0.75f) / 0.25f;
+            r = 255; gv = (int)((1 - s) * 255); b = 0;
+        }
+        return Color.FromArgb(r, gv, b);
     }
 
     // ── Gaze highlight helpers ────────────────────────────────────────────
@@ -970,6 +1151,21 @@ public class GamePlayForm : Form
         {
             feedbackLabel.Text = "🏆 All animals are home! You win!";
             feedbackLabel.BackColor = Color.FromArgb(200, 20, 120, 20);
+
+            // Signal Python to save the gaze heatmap it has been building live
+            try
+            {
+                string winMsg = $"WIN:{currentUser.PlayerName}";
+                using var winSock = new System.Net.Sockets.UdpClient();
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(winMsg);
+                winSock.Send(bytes, bytes.Length, "127.0.0.1", 5009);
+                ShowFeedback("📊 Heatmap saving… check Desktop\\GazeHeatmaps!", Color.DeepSkyBlue);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Could not send WIN signal: " + ex.Message);
+            }
+
             MessageBox.Show("🎉 Congratulations! All animals found their homes!", "You Win!",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }

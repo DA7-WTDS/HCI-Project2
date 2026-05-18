@@ -4,6 +4,8 @@ import os
 import math
 import time
 import glob
+import threading
+import numpy as np
 from collections import deque
 from deepface import DeepFace
 import mediapipe as mp
@@ -69,6 +71,7 @@ class FaceMeshGazeTracker:
         self._timestamp_ms  = 0
         self._frame         = None
         self._ratio         = None
+        self._ratio_y       = None   # nose-tip Y as vertical estimate
         self._annotated     = None
 
     def refresh(self, frame):
@@ -76,6 +79,7 @@ class FaceMeshGazeTracker:
         self._frame     = frame.copy()
         self._annotated = frame.copy()
         self._ratio     = None
+        self._ratio_y   = None
         self._timestamp_ms += 33   # ~30 fps
 
         h, w = frame.shape[:2]
@@ -110,9 +114,22 @@ class FaceMeshGazeTracker:
         if ratios:
             self._ratio = sum(ratios) / len(ratios)
 
+        # ── Vertical estimate: nose-tip landmark (index 1) Y coordinate ──
+        # Normalised 0 (top of frame) → 1 (bottom). Closer to 0 = user
+        # tilting head up / looking up; closer to 1 = looking down.
+        # This is a head-pose proxy, not true vertical iris tracking.
+        try:
+            self._ratio_y = lm[1].y   # nose tip, already 0-1 normalised
+        except Exception:
+            self._ratio_y = None
+
     def horizontal_ratio(self):
         """Return averaged iris ratio (0–1), or None if no face detected."""
         return self._ratio
+
+    def vertical_ratio(self):
+        """Return nose-tip Y ratio (0–1) as vertical gaze proxy, or None."""
+        return self._ratio_y
 
     def annotated_frame(self):
         """Return frame with iris dots drawn."""
@@ -194,6 +211,59 @@ class CircularMenuController:
 
 
 # =========================================================================
+# HEATMAP SAVE HELPER
+# =========================================================================
+def _save_heatmap(heatmap_accum: np.ndarray, player_name: str) -> None:
+    """
+    Render the accumulated float heatmap and save it as a PNG to
+    Desktop\\GazeHeatmaps\\gaze_<player>_<timestamp>.png.
+    """
+    try:
+        fh, fw = heatmap_accum.shape[:2]
+
+        # 1. Blur + normalise + colourmap
+        blurred  = cv2.GaussianBlur(heatmap_accum, (0, 0), sigmaX=25)
+        norm     = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX)
+        norm_u8  = norm.astype(np.uint8)
+        heat_img = cv2.applyColorMap(norm_u8, cv2.COLORMAP_JET)
+
+        # 2. Black canvas → blend heatmap at 70% opacity
+        canvas = np.zeros((fh, fw, 3), dtype=np.uint8)
+        mask   = (norm_u8 > 5).astype(np.float32)[:, :, np.newaxis]
+        canvas = (canvas * (1 - mask * 0.7) + heat_img * (mask * 0.7)).astype(np.uint8)
+
+        # 3. Colour-scale legend bar (bottom-right)
+        leg_w, leg_h = 200, 18
+        leg_x, leg_y = fw - leg_w - 10, fh - 32
+        for i in range(leg_w):
+            t   = i / leg_w
+            val = int(t * 255)
+            col = cv2.applyColorMap(np.array([[[val]]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0].tolist()
+            canvas[leg_y:leg_y + leg_h, leg_x + i] = col
+        cv2.rectangle(canvas, (leg_x, leg_y), (leg_x + leg_w, leg_y + leg_h), (255, 255, 255), 1)
+        cv2.putText(canvas, "Low",  (leg_x - 28, leg_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        cv2.putText(canvas, "High", (leg_x + leg_w + 3, leg_y + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        cv2.putText(canvas, "Gaze Heatmap", (leg_x + 40, leg_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+        # 4. Timestamp + player watermark
+        import datetime
+        stamp = f"{player_name}  {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        cv2.putText(canvas, stamp, (8, fh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+
+        # 5. Save
+        desktop  = os.path.join(os.path.expanduser("~"), "Desktop")
+        save_dir = os.path.join(desktop, "GazeHeatmaps")
+        os.makedirs(save_dir, exist_ok=True)
+        safe_name = "".join(c for c in player_name if c.isalnum() or c in "-_") or "Player"
+        ts        = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath  = os.path.join(save_dir, f"gaze_{safe_name}_{ts}.png")
+        cv2.imwrite(filepath, canvas)
+        print(f"[HEATMAP] Saved → {filepath}")
+    except Exception as exc:
+        print(f"[HEATMAP] Save failed: {exc}")
+
+
+# =========================================================================
 # MAIN AI LOOP
 # =========================================================================
 def main():
@@ -213,6 +283,33 @@ def main():
     PORT_EMOTION   = 5005
     PORT_HAND_MENU = 5007
     PORT_LOGIN     = 5008
+    PORT_WIN       = 5009   # C# sends WIN:<PlayerName> here when game is won
+
+    # ── Win-signal listener (background thread) ───────────────────────────
+    # Set by the listener thread; main loop checks and saves heatmap.
+    _win_event      = threading.Event()
+    _win_player     = ["Player"]   # mutable container for thread-safe name passing
+
+    def _listen_for_win():
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", PORT_WIN))
+            srv.settimeout(1.0)
+            while not _win_event.is_set():
+                try:
+                    data, _ = srv.recvfrom(256)
+                    msg = data.decode("utf-8", errors="ignore")
+                    if msg.startswith("WIN:"):
+                        _win_player[0] = msg[4:].strip() or "Player"
+                        _win_event.set()
+                except socket.timeout:
+                    pass
+            srv.close()
+        except Exception as e:
+            print(f"[WIN-listener] {e}")
+
+    threading.Thread(target=_listen_for_win, daemon=True).start()
 
     # Initialize Camera
     cap = cv2.VideoCapture(0)  # Change to 1 if using a secondary/mobile camera
@@ -266,6 +363,9 @@ def main():
     menu_active  = False              # True while the hand menu is open
     gaze_frame   = 0                  # frame counter for gaze sub-sampling
 
+    # ── Live gaze heatmap accumulation buffer ──────────────────────────────
+    heatmap_accum = None   # float32 ndarray (frame_h, frame_w), lazy-init on first frame
+
     print("AI System Started. Press 'q' to quit.")
 
     while True:
@@ -280,10 +380,12 @@ def main():
         # Skip entirely when hand menu is open (user isn't looking at animals).
         # Also run only every 2nd frame to halve the Face Landmarker load.
         gaze_frame += 1
-        ratio = None
+        ratio   = None
+        ratio_y = None
         if not menu_active and (gaze_frame % 2 == 0):
             gaze.refresh(frame)
-            ratio = gaze.horizontal_ratio()
+            ratio   = gaze.horizontal_ratio()
+            ratio_y = gaze.vertical_ratio()
 
             if ratio is not None:
                 if ratio > 0.53:
@@ -298,6 +400,19 @@ def main():
                 for d in gaze_history:
                     counts[d] += 1
                 gaze_dir = max(counts, key=lambda k: counts[k])
+
+        # ── Accumulate gaze into heatmap buffer ───────────────────────────
+        fh, fw = frame.shape[:2]
+        if heatmap_accum is None:
+            heatmap_accum = np.zeros((fh, fw), dtype=np.float32)
+
+        if ratio is not None and ratio_y is not None:
+            # Flip X: iris ratio 1 = left = low screen X → invert
+            cx = int((1.0 - ratio)   * (fw - 1))
+            cy = int(ratio_y         * (fh - 1))
+            cx = max(0, min(fw - 1, cx))
+            cy = max(0, min(fh - 1, cy))
+            heatmap_accum[cy, cx] += 1.0
 
         # ── Ambient Lighting Detection (rolling average + hysteresis) ──────
         gray_light = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -314,7 +429,10 @@ def main():
 
         frame_count += 1
         timestamp_ms += 33  # ~30 fps
-        display_frame = gaze.annotated_frame()  # pupil visualization built-in
+        _annotated = gaze.annotated_frame()
+        display_frame = (_annotated if _annotated is not None else frame).copy()
+
+        # (Heatmap is accumulated silently and saved on WIN signal — no live overlay)
 
         # -----------------------------------------------------------------
         # 1. MediaPipe Hand Tracking & Menu  (logic from Bluetooth.ipynb)
@@ -426,7 +544,15 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         # ── Send Unified UDP Payload (every frame, port 5005) ─────────────
-        unified_payload = f"EMOTION:{last_emotion}|GAZE:{gaze_dir}|LIGHTING:{lighting_state}"
+        gaze_x_str = f"{ratio:.4f}"   if ratio   is not None else "0.5"
+        gaze_y_str = f"{ratio_y:.4f}" if ratio_y is not None else "0.5"
+        unified_payload = (
+            f"EMOTION:{last_emotion}"
+            f"|GAZE:{gaze_dir}"
+            f"|GAZE_X:{gaze_x_str}"
+            f"|GAZE_Y:{gaze_y_str}"
+            f"|LIGHTING:{lighting_state}"
+        )
         try:
             sock.sendto(unified_payload.encode('utf-8'), (udp_ip, PORT_EMOTION))
         except Exception:
@@ -434,6 +560,13 @@ def main():
 
         # Display
         cv2.imshow('Unified AI Vision', display_frame)
+
+        # ── Check for win signal → save heatmap ───────────────────────────
+        if _win_event.is_set() and heatmap_accum is not None:
+            _save_heatmap(heatmap_accum, _win_player[0])
+            heatmap_accum = np.zeros_like(heatmap_accum)  # reset for next round
+            _win_event.clear()
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
