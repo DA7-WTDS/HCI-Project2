@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Windows.Forms;
 using System.Net.Sockets;
@@ -28,9 +30,17 @@ public class GamePlayForm : Form
     private string currentLighting = "bright";
     private bool isNightMode = false;
 
-    // ── Hand Menu listener (NEW) ──────────────────────────────────────────
+    // ── Gaze highlight ────────────────────────────────────────────────────
+    private bool gazeHighlightActive = false;   // are highlights currently on?
+    private static readonly Color GazeHighlightColor = Color.Yellow;
+
+    // ── Hand Menu listener ────────────────────────────────────────────────
     private UdpClient? handMenuUdpClient;
     private bool isListeningHandMenu = false;
+
+    // ── Hand Menu visual overlay (single double-buffered pie panel) ───────
+    private Panel handMenuOverlay = null!;
+    private string currentHoveredOption = "";
 
     // ── YOLO listener (NEW) ───────────────────────────────────────────────
     private UdpClient? yoloUdpClient;
@@ -78,8 +88,8 @@ public class GamePlayForm : Form
         SetupGUI();
         SetupTuio();
         SetupEmotionListener();
-        SetupYoloListener(); // NEW
-        SetupHandMenuListener(); // NEW Hand Menu
+        SetupYoloListener();
+        SetupHandMenuListener();
     }
 
     private void SetupGUI()
@@ -306,6 +316,118 @@ public class GamePlayForm : Form
         emotionLabel.BringToFront();
         gazeLabel.BringToFront();
         lightingLabel.BringToFront();
+
+        BuildHandMenuOverlay();
+    }
+
+    private void BuildHandMenuOverlay()
+    {
+        // Single double-buffered panel — all pie drawing in one Paint pass.
+        // No child controls = no cascading repaints = no stuttering.
+        handMenuOverlay = new DoubleBufferedPanel
+        {
+            Size      = this.ClientSize,
+            Location  = Point.Empty,
+            BackColor = Color.FromArgb(200, 8, 8, 24),
+            Visible   = false,
+        };
+        handMenuOverlay.Paint += DrawPieMenu;
+        this.Controls.Add(handMenuOverlay);
+        handMenuOverlay.BringToFront();
+    }
+
+    // ── Pie menu draw ─────────────────────────────────────────────────────
+    private static readonly (string Key, string Icon, string Label,
+        Color Base, float StartAngle)[] PieSlices =
+    {
+        // Three 120° slices. GDI+ angles: 0=right, clockwise.
+        // startAngle=210 puts Hint at the top (centre angle=270°).
+        ("Hint",    "💡", "Hint",    Color.FromArgb(255, 210, 170,  20), 210f),
+        ("Logout",  "🚪", "Logout",  Color.FromArgb(255,  60, 110, 240), 330f),
+        ("Restart", "🔄", "Restart", Color.FromArgb(255, 230,  90,  20),  90f),
+    };
+
+    private void DrawPieMenu(object? sender, PaintEventArgs e)
+    {
+        var g  = e.Graphics;
+        g.SmoothingMode      = SmoothingMode.AntiAlias;
+        g.TextRenderingHint  = TextRenderingHint.AntiAliasGridFit;
+
+        int cx = handMenuOverlay.Width  / 2;
+        int cy = handMenuOverlay.Height / 2;
+        int r  = 190;
+        var pieRect = new RectangleF(cx - r, cy - r, r * 2, r * 2);
+
+        // ── Draw pie slices ───────────────────────────────────────────────
+        foreach (var (key, icon, label, baseColor, startAngle) in PieSlices)
+        {
+            bool hov = key == currentHoveredOption;
+            Color fill = hov
+                ? Color.FromArgb(255,
+                    Math.Min(255, baseColor.R + 50),
+                    Math.Min(255, baseColor.G + 50),
+                    Math.Min(255, baseColor.B + 50))
+                : Color.FromArgb(190, baseColor.R, baseColor.G, baseColor.B);
+
+            using (var brush = new SolidBrush(fill))
+                g.FillPie(brush, pieRect.X, pieRect.Y, pieRect.Width, pieRect.Height,
+                          startAngle, 120f);
+
+            using (var pen = new Pen(hov ? Color.Gold : Color.FromArgb(180, 255, 255, 255),
+                                     hov ? 4f : 1.5f))
+                g.DrawPie(pen, pieRect.X, pieRect.Y, pieRect.Width, pieRect.Height,
+                          startAngle, 120f);
+
+            // ── Text label in the middle of each slice ────────────────────
+            double midRad = (startAngle + 60.0) * Math.PI / 180.0;
+            float  tr     = r * 0.62f;
+            float  tx     = cx + tr * (float)Math.Cos(midRad);
+            float  ty     = cy + tr * (float)Math.Sin(midRad);
+
+            var sf = new StringFormat
+            {
+                Alignment     = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+            };
+
+            // Icon
+            using (var f = new Font("Segoe UI Emoji", 22))
+            using (var b = new SolidBrush(Color.White))
+                g.DrawString(icon, f, b,
+                    new RectangleF(tx - 44, ty - 44, 88, 48), sf);
+
+            // Label
+            Color labelCol = hov ? Color.Gold : Color.White;
+            using (var f = new Font("Segoe UI", 11, FontStyle.Bold))
+            using (var b = new SolidBrush(labelCol))
+                g.DrawString(label, f, b,
+                    new RectangleF(tx - 50, ty + 8, 100, 28), sf);
+        }
+
+        // ── Centre circle ─────────────────────────────────────────────────
+        int cr = 44;
+        using (var b = new SolidBrush(Color.FromArgb(230, 20, 20, 40)))
+            g.FillEllipse(b, cx - cr, cy - cr, cr * 2, cr * 2);
+        using (var pen = new Pen(Color.FromArgb(160, 255, 255, 255), 2))
+            g.DrawEllipse(pen, cx - cr, cy - cr, cr * 2, cr * 2);
+        using (var f  = new Font("Segoe UI Emoji", 22))
+        using (var b  = new SolidBrush(Color.White))
+        using (var sf = new StringFormat { Alignment = StringAlignment.Center,
+                                           LineAlignment = StringAlignment.Center })
+            g.DrawString("✋", f, b,
+                new RectangleF(cx - cr, cy - cr, cr * 2, cr * 2), sf);
+
+        // ── Title ─────────────────────────────────────────────────────────
+        using (var f  = new Font("Segoe UI", 18, FontStyle.Bold))
+        using (var b  = new SolidBrush(Color.White))
+        using (var sf = new StringFormat { Alignment = StringAlignment.Center })
+            g.DrawString("Hand Menu", f, b, new PointF(cx, cy - r - 46), sf);
+
+        using (var f  = new Font("Segoe UI", 10))
+        using (var b  = new SolidBrush(Color.FromArgb(200, 200, 200, 220)))
+        using (var sf = new StringFormat { Alignment = StringAlignment.Center })
+            g.DrawString("Make a FIST to select  ·  Lower hand to cancel",
+                f, b, new PointF(cx, cy - r - 22), sf);
     }
 
     // ── Input-source badge helpers (NEW) ──────────────────────────────────
@@ -383,6 +505,7 @@ public class GamePlayForm : Form
     private void HandleVisionData(string message)
     {
         string emotion = "none";
+        string prevGaze = currentGaze;
 
         // Parse structured payload: EMOTION:happy|GAZE:Left|LIGHTING:bright
         foreach (var part in message.Split('|'))
@@ -401,6 +524,9 @@ public class GamePlayForm : Form
         emotionLabel.Text  = $"Emotion: {emotion}";
         gazeLabel.Text     = $"Gaze: {currentGaze}";
         lightingLabel.Text = $"Lighting: {currentLighting}";
+
+        // ── Gaze-based animal highlight ───────────────────────────────────
+        ApplyGazeHighlight();
 
         // Context Awareness (Lighting) ─────────────────────────────────
         if (currentLighting == "dark" && !isNightMode)
@@ -428,6 +554,51 @@ public class GamePlayForm : Form
             lastHintEmotion = "happy";
         }
     }
+
+    // ── Gaze highlight helpers ────────────────────────────────────────────
+    private void ApplyGazeHighlight()
+    {
+        bool lookingLeft = currentGaze == "Left";
+
+        if (lookingLeft && !gazeHighlightActive)
+        {
+            gazeHighlightActive = true;
+            HighlightAllAnimals();
+            ShowFeedback("👀 Looking at the animals!", Color.Yellow);
+        }
+        else if (!lookingLeft && gazeHighlightActive)
+        {
+            gazeHighlightActive = false;
+            ClearAllGazeHighlights();
+        }
+    }
+
+    private void HighlightAllAnimals()
+    {
+        foreach (var animal in animalById.Values)
+        {
+            if (animal.IsMatched) continue;   // already home — leave it
+            animal.Picture.Paint += GazeHighlight_Paint;
+            animal.Picture.Invalidate();
+        }
+    }
+
+    private void ClearAllGazeHighlights()
+    {
+        foreach (var animal in animalById.Values)
+        {
+            animal.Picture.Paint -= GazeHighlight_Paint;
+            animal.Picture.Invalidate();
+        }
+    }
+
+    private void GazeHighlight_Paint(object? sender, PaintEventArgs e)
+    {
+        if (sender is not PictureBox pic) return;
+        using var pen = new Pen(GazeHighlightColor, 5);
+        e.Graphics.DrawRectangle(pen, 2, 2, pic.Width - 5, pic.Height - 5);
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     private void ApplyNightMode(bool night)
     {
@@ -569,16 +740,22 @@ public class GamePlayForm : Form
                     if (command.StartsWith("SELECT:"))
                     {
                         string action = command.Substring(7);
+                        HideHandMenuOverlay();
                         HandleHandMenuAction(action);
                     }
                     else if (command.StartsWith("HOVER:"))
                     {
                         string action = command.Substring(6);
-                        ShowFeedback($"Hand Menu: Hovering over {action}...", Color.LightBlue);
+                        UpdateHandMenuHover(action);
                     }
                     else if (command.StartsWith("OPEN_MENU:"))
                     {
-                        ShowFeedback("Hand Menu Opened! Make a fist to select.", Color.Cyan);
+                        string initial = command.Substring(10);
+                        ShowHandMenuOverlay(initial);
+                    }
+                    else if (command == "CANCEL")
+                    {
+                        HideHandMenuOverlay();
                     }
                 });
             }
@@ -612,6 +789,35 @@ public class GamePlayForm : Form
             logoutTimer.Tick += (s, e) => { logoutTimer.Stop(); this.Close(); };
             logoutTimer.Start();
         }
+    }
+
+    // ── Hand Menu overlay helpers ─────────────────────────────────────────
+    private void ShowHandMenuOverlay(string initialOption)
+    {
+        currentHoveredOption = initialOption;
+        RefreshMenuCards();
+        handMenuOverlay.Visible = true;
+        handMenuOverlay.BringToFront();
+        ShowFeedback("✋ Hand Menu open — make a FIST to select", Color.Cyan);
+    }
+
+    private void HideHandMenuOverlay()
+    {
+        handMenuOverlay.Visible  = false;
+        currentHoveredOption     = "";
+    }
+
+    private void UpdateHandMenuHover(string option)
+    {
+        currentHoveredOption = option;
+        RefreshMenuCards();
+        ShowFeedback($"👆 {option} — make a fist to confirm", Color.Gold);
+    }
+
+    private void RefreshMenuCards()
+    {
+        // Single panel = single repaint — no cascading child-control redraws
+        handMenuOverlay.Invalidate();
     }
     // ─────────────────────────────────────────────────────────────────────
 
@@ -847,4 +1053,18 @@ public class GamePlayForm : Form
         [property: JsonPropertyName("x")]     float  X,
         [property: JsonPropertyName("y")]     float  Y
     );
+}
+
+// ── Double-buffered panel (eliminates pie menu flicker) ───────────────────────
+internal sealed class DoubleBufferedPanel : Panel
+{
+    public DoubleBufferedPanel()
+    {
+        this.SetStyle(
+            ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.AllPaintingInWmPaint  |
+            ControlStyles.UserPaint,
+            true);
+        this.UpdateStyles();
+    }
 }

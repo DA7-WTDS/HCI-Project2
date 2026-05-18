@@ -4,11 +4,121 @@ import os
 import math
 import time
 import glob
+from collections import deque
 from deepface import DeepFace
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
-from gaze_tracking import GazeTracking
+# =========================================================================
+# GAZE TRACKING  (MediaPipe Face Landmarker — Tasks API, iris landmarks)
+# Uses the same Tasks API already used for hand tracking — mp.solutions
+# was removed in newer mediapipe versions so we use mp_vision directly.
+# Auto-downloads face_landmarker.task on first run (~1.8 MB).
+#
+# Iris landmark indices (478-point model):
+#   Left iris centre = 468, Right iris centre = 473
+#   Left  eye corners: inner=133, outer=33
+#   Right eye corners: inner=362, outer=263
+#   ratio ~ 0.0 → camera-right (user looking left)
+#   ratio ~ 1.0 → camera-left  (user looking right)
+#   ratio ~ 0.5 → centre
+# =========================================================================
+class FaceMeshGazeTracker:
+    """Gaze tracker using MediaPipe Face Landmarker Tasks API (iris landmarks)."""
+
+    _L_IRIS  = 468
+    _R_IRIS  = 473
+    _L_INNER = 133
+    _L_OUTER = 33
+    _R_INNER = 362
+    _R_OUTER = 263
+
+    _MODEL_URL = (
+        "https://storage.googleapis.com/mediapipe-models/"
+        "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    )
+
+    def __init__(self):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(script_dir, "face_landmarker.task")
+
+        if not os.path.exists(model_path):
+            print("[GAZE] face_landmarker.task not found — downloading (~1.8 MB)...")
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(self._MODEL_URL, model_path)
+                print(f"[GAZE] Saved to {model_path}")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Download failed: {exc}\n"
+                    f"Manually download from:\n  {self._MODEL_URL}\n"
+                    f"Save it to: {model_path}"
+                ) from exc
+
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            running_mode=mp_vision.RunningMode.VIDEO,
+        )
+        self._landmarker    = mp_vision.FaceLandmarker.create_from_options(options)
+        self._timestamp_ms  = 0
+        self._frame         = None
+        self._ratio         = None
+        self._annotated     = None
+
+    def refresh(self, frame):
+        """Process a new BGR frame."""
+        self._frame     = frame.copy()
+        self._annotated = frame.copy()
+        self._ratio     = None
+        self._timestamp_ms += 33   # ~30 fps
+
+        h, w = frame.shape[:2]
+        rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect_for_video(mp_img, self._timestamp_ms)
+
+        if not result.face_landmarks:
+            return
+
+        lm = result.face_landmarks[0]
+
+        def pt(idx):
+            return int(lm[idx].x * w), int(lm[idx].y * h)
+
+        ratios = []
+        for iris_idx, inner_idx, outer_idx in [
+            (self._L_IRIS,  self._L_INNER, self._L_OUTER),
+            (self._R_IRIS,  self._R_INNER, self._R_OUTER),
+        ]:
+            ix      = lm[iris_idx].x
+            inner_x = lm[inner_idx].x
+            outer_x = lm[outer_idx].x
+            eye_w   = abs(outer_x - inner_x)
+            if eye_w < 1e-4:
+                continue
+            left_x = min(inner_x, outer_x)
+            ratio  = (ix - left_x) / eye_w
+            ratios.append(ratio)
+            cv2.circle(self._annotated, pt(iris_idx), 4, (0, 255, 255), -1)
+
+        if ratios:
+            self._ratio = sum(ratios) / len(ratios)
+
+    def horizontal_ratio(self):
+        """Return averaged iris ratio (0–1), or None if no face detected."""
+        return self._ratio
+
+    def annotated_frame(self):
+        """Return frame with iris dots drawn."""
+        if self._annotated is not None:
+            return self._annotated
+        return self._frame
 
 # Hand skeleton connection pairs for drawing (replaces mp.solutions.hands.HAND_CONNECTIONS)
 HAND_CONNECTIONS = [
@@ -48,10 +158,13 @@ class CircularMenuController:
         angle = math.degrees(math.atan2(dy, dx))
         if angle < 0: angle += 360
 
-        if 60 <= angle <= 120:                          return "Hint"
-        elif 120 < angle <= 240:                        return "Restart"
-        elif 240 < angle <= 360 or 0 <= angle < 60:    return "Logout"
-        return self.current_selection
+        # Three equal 120° zones — matching the visual pie drawn in C#:
+        #   Hint   : 30°–150°  (centre 90°  = hand pointing UP)
+        #   Restart: 150°–270° (centre 210° = hand pointing DOWN-LEFT)
+        #   Logout : 270°–360° + 0°–30° (centre 330° = hand pointing RIGHT)
+        if 30 <= angle < 150:                       return "Hint"
+        elif 150 <= angle < 270:                    return "Restart"
+        else:                                       return "Logout"  # 270-360 + 0-30
 
     def process_hand(self, landmarks):
         if landmarks is None:
@@ -136,9 +249,22 @@ def main():
     last_registration_time = 0
     last_emotion = "none"
 
-    # Initialize GazeTracking
-    gaze = GazeTracking()
-    print("GazeTracking initialized.")
+    # Initialize Gaze Tracker (MediaPipe FaceMesh iris landmarks)
+    gaze = FaceMeshGazeTracker()
+    print("FaceMeshGazeTracker initialized (MediaPipe iris landmarks).")
+
+    # ── Lighting smoothing (rolling average + hysteresis) ─────────────────
+    # Avoids flickering between day/night in a normally-lit room.
+    # Switch to "dark" only when the 60-frame average brightness drops below 55.
+    # Switch back to "bright" only when average rises above 90.
+    lighting_history = deque(maxlen=60)   # ~2 seconds at 30 fps
+    lighting_state   = "bright"           # start assuming a lit room
+
+    # ── Gaze smoothing ──────────────────────────────────────────────────────
+    gaze_history = deque(maxlen=12)   # ~0.4 sec at 30 fps
+    gaze_dir     = "Center"           # last stable gaze direction
+    menu_active  = False              # True while the hand menu is open
+    gaze_frame   = 0                  # frame counter for gaze sub-sampling
 
     print("AI System Started. Press 'q' to quit.")
 
@@ -150,20 +276,41 @@ def main():
         # Flip the frame immediately so the display and tracking match
         frame = cv2.flip(frame, 1)
 
-        # ── Gaze Tracking (every frame) ───────────────────────────────────
-        gaze.refresh(frame)
-        ratio = gaze.horizontal_ratio()
-        gaze_dir = "Center"
-        if ratio is not None:
-            if ratio <= 0.50:
-                gaze_dir = "Right"
-            elif ratio >= 0.62:
-                gaze_dir = "Left"
+        # ── Gaze Tracking ─────────────────────────────────────────────────
+        # Skip entirely when hand menu is open (user isn't looking at animals).
+        # Also run only every 2nd frame to halve the Face Landmarker load.
+        gaze_frame += 1
+        ratio = None
+        if not menu_active and (gaze_frame % 2 == 0):
+            gaze.refresh(frame)
+            ratio = gaze.horizontal_ratio()
 
-        # ── Ambient Lighting Detection (every frame) ──────────────────────
+            if ratio is not None:
+                if ratio > 0.53:
+                    raw_dir = "Left"
+                elif ratio < 0.47:
+                    raw_dir = "Right"
+                else:
+                    raw_dir = "Center"
+                gaze_history.append(raw_dir)
+
+                counts = {"Left": 0, "Center": 0, "Right": 0}
+                for d in gaze_history:
+                    counts[d] += 1
+                gaze_dir = max(counts, key=lambda k: counts[k])
+
+        # ── Ambient Lighting Detection (rolling average + hysteresis) ──────
         gray_light = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         mean_brightness = gray_light.mean()
-        lighting_state = "dark" if mean_brightness < 80 else "bright"
+        lighting_history.append(mean_brightness)
+        avg_brightness = sum(lighting_history) / len(lighting_history)
+
+        # Hysteresis: only flip state when average clearly crosses threshold.
+        # This prevents a single dark/bright frame from causing day↔night chaos.
+        if lighting_state == "bright" and avg_brightness < 55:
+            lighting_state = "dark"
+        elif lighting_state == "dark" and avg_brightness > 90:
+            lighting_state = "bright"
 
         frame_count += 1
         timestamp_ms += 33  # ~30 fps
@@ -186,6 +333,11 @@ def main():
                 sock.sendto(command.encode('utf-8'), (udp_ip, PORT_HAND_MENU))
             except Exception:
                 pass
+            # Track menu state so we can pause gaze when menu is open
+            if command.startswith("OPEN_MENU:"):
+                menu_active = True
+            elif command.startswith("SELECT:") or command == "CANCEL":
+                menu_active = False
 
         # Draw hand skeleton with plain OpenCV
         if hand_result.hand_landmarks:
@@ -267,10 +419,11 @@ def main():
                 pass  # Ignore DeepFace exceptions (same as original)
 
         # ── Gaze & Lighting OSD overlays ──────────────────────────────────
-        cv2.putText(display_frame, f"Gaze: {gaze_dir}", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-        cv2.putText(display_frame, f"Lighting: {lighting_state} ({mean_brightness:.1f})", (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        ratio_str = f"{ratio:.3f}" if ratio is not None else "n/a"
+        cv2.putText(display_frame, f"Gaze: {gaze_dir}  ratio={ratio_str}", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(display_frame, f"Lighting: {lighting_state} (avg={avg_brightness:.1f})", (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         # ── Send Unified UDP Payload (every frame, port 5005) ─────────────
         unified_payload = f"EMOTION:{last_emotion}|GAZE:{gaze_dir}|LIGHTING:{lighting_state}"
