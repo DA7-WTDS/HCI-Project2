@@ -15,7 +15,7 @@ CLASS_TO_ANIMAL_ID = {
     "bird":  0,
     "dog":   1,
     "fish":  2,
-    "sheep": 3,   # swap for "cow" / "horse" / "bear" if that's your farm toy
+    "cow": 3,   # swap for "cow" / "horse" / "bear" if that's your farm toy
 }
 
 

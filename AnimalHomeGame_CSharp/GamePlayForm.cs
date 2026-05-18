@@ -58,7 +58,7 @@ public class GamePlayForm : Form
         ("Bird",  0, "bird.jpeg",  "Nest"),
         ("Dog",   1, "dog.jpeg",   "Doghouse"),
         ("Fish",  2, "fish.jpeg",  "Water"),
-        ("Farm",  3, "farm.jpeg",  "Farm"),
+        ("Cow",  3, "cow.jpeg",  "COW"),
     };
 
     private static readonly (string name, string image)[] HomeDefs =
@@ -343,6 +343,7 @@ public class GamePlayForm : Form
         tuioHandler.OnObjectUpdated += HandleTuioUpdated;
         tuioHandler.OnObjectRemoved += HandleTuioRemoved;
         tuioHandler.Start();
+
     }
 
     private void SetupEmotionListener()
@@ -649,6 +650,12 @@ public class GamePlayForm : Form
                 return;
             }
 
+            if (grabbedAnimals.ContainsKey(symbolId) && animalInputSource.TryGetValue(symbolId, out string? existingSrc) && existingSrc == "YOLO")
+            {
+                grabbedAnimals.Remove(symbolId);
+                ClearInputSourceBadge(symbolId);
+            }
+
             grabbedAnimals[symbolId] = animal;
             animal.Picture.BorderStyle = BorderStyle.Fixed3D;
             MoveAnimalToMarker(animal, normX, normY);
@@ -662,6 +669,14 @@ public class GamePlayForm : Form
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Move ID={symbolId}  x={normX:F2} y={normY:F2}";
+
+            if (!grabbedAnimals.ContainsKey(symbolId))
+            {
+                // Missed the add event — grab it now
+                HandleTuioAdded(symbolId, normX, normY);
+                return;
+            }
+
             if (!grabbedAnimals.TryGetValue(symbolId, out GameItem? animal)) return;
             MoveAnimalToMarker(animal, normX, normY);
         });
