@@ -517,7 +517,7 @@ public class GamePlayForm : Form
 
         grabbedAnimals[animalId] = animal;
         animal.Picture.BorderStyle = BorderStyle.Fixed3D;
-        MoveAnimalToMarker(animal, normX, normY);
+        MoveAnimalToMarker(animal, 1f - normX, normY);
         SetInputSourceBadge(animalId, "YOLO");
         ShowFeedback($"YOLO detected {animal.Name}! Move it to its home!", Color.LimeGreen);
     }
@@ -526,7 +526,7 @@ public class GamePlayForm : Form
     {
         if (!grabbedAnimals.TryGetValue(animalId, out GameItem? animal)) return;
         if (animalInputSource.TryGetValue(animalId, out string? src) && src != "YOLO") return;
-        MoveAnimalToMarker(animal, normX, normY);
+        MoveAnimalToMarker(animal, 1f - normX, normY);
     }
 
     private void HandleYoloRemoved(int animalId, float normX, float normY)
