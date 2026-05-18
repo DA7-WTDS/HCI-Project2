@@ -18,10 +18,15 @@ public class GamePlayForm : Form
     private readonly MainForm parentScanner;
     private TuioHandler tuioHandler;
 
-    // ── Emotion listener (unchanged) ──────────────────────────────────────
+    // ── Emotion / Gaze / Lighting listener ────────────────────────────────
     private UdpClient? udpClient;
     private bool isListeningEmotions = false;
     private Label emotionLabel = null!;
+    private Label gazeLabel = null!;
+    private Label lightingLabel = null!;
+    private string currentGaze = "Center";
+    private string currentLighting = "bright";
+    private bool isNightMode = false;
 
     // ── Hand Menu listener (NEW) ──────────────────────────────────────────
     private UdpClient? handMenuUdpClient;
@@ -147,6 +152,28 @@ public class GamePlayForm : Form
             Location = new Point(this.ClientSize.Width - 250, 10),
         };
         this.Controls.Add(emotionLabel);
+
+        gazeLabel = new Label
+        {
+            Text = "Gaze: Center",
+            Font = new Font("Segoe UI", 10, FontStyle.Bold),
+            ForeColor = Color.Cyan,
+            BackColor = Color.FromArgb(130, 0, 0, 0),
+            AutoSize = true,
+            Location = new Point(this.ClientSize.Width - 250, 38),
+        };
+        this.Controls.Add(gazeLabel);
+
+        lightingLabel = new Label
+        {
+            Text = "Lighting: bright",
+            Font = new Font("Segoe UI", 10, FontStyle.Bold),
+            ForeColor = Color.LightSalmon,
+            BackColor = Color.FromArgb(130, 0, 0, 0),
+            AutoSize = true,
+            Location = new Point(this.ClientSize.Width - 250, 62),
+        };
+        this.Controls.Add(lightingLabel);
 
         int count    = AnimalDefs.Length;
         int itemHeight = 100;
@@ -277,6 +304,8 @@ public class GamePlayForm : Form
         feedbackLabel.BringToFront();
         debugLabel.BringToFront();
         emotionLabel.BringToFront();
+        gazeLabel.BringToFront();
+        lightingLabel.BringToFront();
     }
 
     // ── Input-source badge helpers (NEW) ──────────────────────────────────
@@ -338,8 +367,8 @@ public class GamePlayForm : Form
             try
             {
                 byte[] bytes = udpClient!.Receive(ref endPoint);
-                string emotion = Encoding.UTF8.GetString(bytes).ToLower();
-                SafeInvoke(() => HandleEmotionReceived(emotion));
+                string message = Encoding.UTF8.GetString(bytes);
+                SafeInvoke(() => HandleVisionData(message));
             }
             catch
             {
@@ -351,10 +380,41 @@ public class GamePlayForm : Form
     private string lastHintEmotion = "";
     private DateTime lastHintTime = DateTime.MinValue;
 
-    private void HandleEmotionReceived(string emotion)
+    private void HandleVisionData(string message)
     {
-        emotionLabel.Text = $"Emotion: {emotion}";
+        string emotion = "none";
 
+        // Parse structured payload: EMOTION:happy|GAZE:Left|LIGHTING:bright
+        foreach (var part in message.Split('|'))
+        {
+            var kv = part.Split(':', 2);
+            if (kv.Length != 2) continue;
+            switch (kv[0].ToUpper())
+            {
+                case "EMOTION":  emotion = kv[1].ToLower(); break;
+                case "GAZE":     currentGaze = kv[1]; break;
+                case "LIGHTING": currentLighting = kv[1]; break;
+            }
+        }
+
+        // Update UI labels
+        emotionLabel.Text  = $"Emotion: {emotion}";
+        gazeLabel.Text     = $"Gaze: {currentGaze}";
+        lightingLabel.Text = $"Lighting: {currentLighting}";
+
+        // Context Awareness (Lighting) ─────────────────────────────────
+        if (currentLighting == "dark" && !isNightMode)
+        {
+            isNightMode = true;
+            ApplyNightMode(true);
+        }
+        else if (currentLighting == "bright" && isNightMode)
+        {
+            isNightMode = false;
+            ApplyNightMode(false);
+        }
+
+        // Emotion-based hints (unchanged logic)
         if ((emotion == "sad" || emotion == "angry") && (DateTime.Now - lastHintTime).TotalSeconds > 5)
         {
             ShowFeedback($"Hey! Don't be {emotion}! Here's a hint: Check the animals' environments!", Color.Orange);
@@ -367,6 +427,42 @@ public class GamePlayForm : Form
             lastHintTime = DateTime.Now;
             lastHintEmotion = "happy";
         }
+    }
+
+    private void ApplyNightMode(bool night)
+    {
+        // Swap background
+        string bgName = night ? "background_night.jpeg" : "background.jpeg";
+        string bgPath = GetAssetPath(bgName);
+        if (File.Exists(bgPath))
+        {
+            this.BackgroundImage?.Dispose();
+            this.BackgroundImage = Image.FromFile(bgPath);
+        }
+        else
+        {
+            this.BackgroundImage = null;
+            this.BackColor = night ? Color.MidnightBlue : Color.DarkGreen;
+        }
+
+        // Swap animal images to night/day variants
+        foreach (var animal in animalById.Values)
+        {
+            string suffix   = night ? "_night.jpeg" : ".jpeg";
+            string baseName = animal.Name.ToLower();
+            string imgPath  = GetAssetPath(baseName + suffix);
+
+            if (File.Exists(imgPath))
+            {
+                animal.Picture.Image?.Dispose();
+                animal.Picture.Image = Image.FromFile(imgPath);
+            }
+        }
+
+        if (night)
+            ShowFeedback("It's getting dark... Help the animals to their beds!", Color.DarkSlateBlue);
+        else
+            ShowFeedback("The sun is up! Time to play.", Color.Orange);
     }
 
     // ── YOLO listener (NEW) ───────────────────────────────────────────────

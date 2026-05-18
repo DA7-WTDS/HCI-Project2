@@ -8,6 +8,7 @@ from deepface import DeepFace
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
+from gaze_tracking import GazeTracking
 
 # Hand skeleton connection pairs for drawing (replaces mp.solutions.hands.HAND_CONNECTIONS)
 HAND_CONNECTIONS = [
@@ -133,6 +134,11 @@ def main():
     frame_count = 0
     timestamp_ms = 0
     last_registration_time = 0
+    last_emotion = "none"
+
+    # Initialize GazeTracking
+    gaze = GazeTracking()
+    print("GazeTracking initialized.")
 
     print("AI System Started. Press 'q' to quit.")
 
@@ -144,9 +150,24 @@ def main():
         # Flip the frame immediately so the display and tracking match
         frame = cv2.flip(frame, 1)
 
+        # ── Gaze Tracking (every frame) ───────────────────────────────────
+        gaze.refresh(frame)
+        ratio = gaze.horizontal_ratio()
+        gaze_dir = "Center"
+        if ratio is not None:
+            if ratio <= 0.50:
+                gaze_dir = "Right"
+            elif ratio >= 0.62:
+                gaze_dir = "Left"
+
+        # ── Ambient Lighting Detection (every frame) ──────────────────────
+        gray_light = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean_brightness = gray_light.mean()
+        lighting_state = "dark" if mean_brightness < 80 else "bright"
+
         frame_count += 1
         timestamp_ms += 33  # ~30 fps
-        display_frame = frame.copy()
+        display_frame = gaze.annotated_frame()  # pupil visualization built-in
 
         # -----------------------------------------------------------------
         # 1. MediaPipe Hand Tracking & Menu  (logic from Bluetooth.ipynb)
@@ -240,10 +261,23 @@ def main():
                                     pass
 
                 if dominant_emotion != 'None':
-                    sock.sendto(dominant_emotion.encode('utf-8'), (udp_ip, PORT_EMOTION))
+                    last_emotion = dominant_emotion
 
             except Exception:
                 pass  # Ignore DeepFace exceptions (same as original)
+
+        # ── Gaze & Lighting OSD overlays ──────────────────────────────────
+        cv2.putText(display_frame, f"Gaze: {gaze_dir}", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        cv2.putText(display_frame, f"Lighting: {lighting_state} ({mean_brightness:.1f})", (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+
+        # ── Send Unified UDP Payload (every frame, port 5005) ─────────────
+        unified_payload = f"EMOTION:{last_emotion}|GAZE:{gaze_dir}|LIGHTING:{lighting_state}"
+        try:
+            sock.sendto(unified_payload.encode('utf-8'), (udp_ip, PORT_EMOTION))
+        except Exception:
+            pass
 
         # Display
         cv2.imshow('Unified AI Vision', display_frame)
