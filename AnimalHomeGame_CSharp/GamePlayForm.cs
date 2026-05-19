@@ -75,7 +75,7 @@ public class GamePlayForm : Form
         ("Bird",  0, "bird.jpeg",  "Nest"),
         ("Dog",   1, "dog.jpeg",   "Doghouse"),
         ("Fish",  2, "fish.jpeg",  "Water"),
-        ("Cow",  3, "cow.jpeg",  "COW"),
+        ("Cow",   3, "farm.jpeg",  "Farm"),   // image on disk is farm.jpeg
     };
 
     private static readonly (string name, string image)[] HomeDefs =
@@ -1005,6 +1005,7 @@ public class GamePlayForm : Form
 
     private void HandleTuioAdded(int symbolId, float normX, float normY)
     {
+        Console.WriteLine($"[TUIO] ADDED   id={symbolId} x={normX:F3} y={normY:F3}  knownIds={string.Join(",", animalById.Keys)}");
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Added ID={symbolId}  x={normX:F2} y={normY:F2}";
@@ -1053,15 +1054,19 @@ public class GamePlayForm : Form
 
     private void HandleTuioUpdated(int symbolId, float normX, float normY)
     {
+        Console.WriteLine($"[TUIO] UPDATED  id={symbolId} x={normX:F3} y={normY:F3}");
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Move ID={symbolId}  x={normX:F2} y={normY:F2}";
 
             if (!grabbedAnimals.ContainsKey(symbolId))
             {
-                // Missed the add event — grab it now
-                HandleTuioAdded(symbolId, normX, normY);
-                return;
+                // Missed the add-event: grab the animal inline (no nested SafeInvoke)
+                if (!animalById.TryGetValue(symbolId, out GameItem? newAnimal)) return;
+                if (newAnimal.IsMatched) return;
+                grabbedAnimals[symbolId] = newAnimal;
+                newAnimal.Picture.BorderStyle = BorderStyle.Fixed3D;
+                SetInputSourceBadge(symbolId, "TUIO");
             }
 
             if (!grabbedAnimals.TryGetValue(symbolId, out GameItem? animal)) return;
@@ -1071,6 +1076,7 @@ public class GamePlayForm : Form
 
     private void HandleTuioRemoved(int symbolId, float normX, float normY)
     {
+        Console.WriteLine($"[TUIO] REMOVED  id={symbolId}");
         SafeInvoke(() =>
         {
             debugLabel.Text = $"TUIO: Removed ID={symbolId}";
@@ -1199,7 +1205,12 @@ public class GamePlayForm : Form
 
     private Point NormToScreen(float nx, float ny)
     {
-        return new Point((int)(nx * this.ClientSize.Width), (int)(ny * this.ClientSize.Height));
+        // Map the full TUIO 0-1 range to the full client area so the animal
+        // can travel all the way from the left column (animals) to the right
+        // column (homes). Clamp to stay within the window.
+        return new Point(
+            Math.Clamp((int)(nx * this.ClientSize.Width),  0, this.ClientSize.Width  - 1),
+            Math.Clamp((int)(ny * this.ClientSize.Height), 0, this.ClientSize.Height - 1));
     }
 
     private GameItem? FindAnimalByPic(PictureBox pic)

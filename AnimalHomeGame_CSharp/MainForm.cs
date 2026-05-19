@@ -147,11 +147,12 @@ public partial class MainForm : Form
         }
         
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 2000 };
-        timer.Tick += (s, args) => 
+        timer.Tick += (s, args) =>
         {
             timer.Stop();
-            GameForm gameMenuForm = new GameForm(activeProfile, this);
-            gameMenuForm.Show();
+            // Skip the intermediate GameForm menu — go straight to gameplay
+            GamePlayForm gamePlay = new GamePlayForm(activeProfile, this);
+            gamePlay.Show();
             this.Hide();
         };
         timer.Start();

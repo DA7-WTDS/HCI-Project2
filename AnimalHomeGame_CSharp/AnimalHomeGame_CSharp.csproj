@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="TCD.System.TUIO" Version="1.0.6" />
+    <!-- TCD.System.TUIO removed: replaced by TuioHandler.cs + tuio_bridge.py -->
   </ItemGroup>
 
 </Project>
