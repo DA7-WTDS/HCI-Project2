@@ -1,0 +1,9 @@
+{
+  "Teacher_1": {
+    "id": "Teacher_1",
+    "username": "Teacher_1",
+    "role": "teacher",
+    "age": null,
+    "registered_at": "2026-05-19T05:29:26"
+  }
+}

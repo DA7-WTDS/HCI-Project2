@@ -11,6 +11,7 @@ from deepface import DeepFace
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
+from database import register_child, get_teacher, update_seen, update_score
 # =========================================================================
 # GAZE TRACKING  (MediaPipe Face Landmarker — Tasks API, iris landmarks)
 # Uses the same Tasks API already used for hand tracking — mp.solutions
@@ -301,7 +302,18 @@ def main():
                     data, _ = srv.recvfrom(256)
                     msg = data.decode("utf-8", errors="ignore")
                     if msg.startswith("WIN:"):
-                        _win_player[0] = msg[4:].strip() or "Player"
+                        # Format: WIN:username,seconds  e.g. WIN:User_1,42.5
+                        payload = msg[4:].strip()
+                        parts   = payload.split(",", 1)
+                        name    = parts[0] or "Player"
+                        try:
+                            secs = float(parts[1]) if len(parts) > 1 else 0.0
+                        except ValueError:
+                            secs = 0.0
+                        # Persist the score (children only — ignore teachers)
+                        if get_teacher(name) is None and secs > 0:
+                            update_score(name, secs)
+                        _win_player[0] = name
                         _win_event.set()
                 except socket.timeout:
                     pass
@@ -507,7 +519,15 @@ def main():
                         if len(df_list) > 0 and len(df_list[0]) > 0:
                             matched_path = df_list[0].iloc[0]['identity']
                             username = os.path.splitext(os.path.basename(matched_path))[0]
-                            sock.sendto(f"LOGIN:{username}".encode('utf-8'), (udp_ip, PORT_LOGIN))
+                            # Determine role: teacher if in teachers_db, otherwise child
+                            teacher = get_teacher(username)
+                            if teacher:
+                                role = "teacher"
+                            else:
+                                register_child(username)         # no-op if already registered
+                                update_seen(username, last_emotion)
+                                role = "child"
+                            sock.sendto(f"LOGIN:{username}:{role}".encode('utf-8'), (udp_ip, PORT_LOGIN))
                             cv2.putText(display_frame, f"User: {username}", (x, y + h + 20),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2, cv2.LINE_AA)
                             recognized = True
@@ -516,11 +536,13 @@ def main():
                         # Auto-register unrecognized user (with 5 second cooldown to prevent spam)
                         if w > 0 and h > 0 and (time.time() - last_registration_time > 5.0):
                             new_user_num = len(existing_faces) + 1
-                            new_path = os.path.join(FACES_DIR, f"User_{new_user_num}.jpg")
-                            # Save the FULL frame, not the cropped face. 
+                            child_id = f"User_{new_user_num}"
+                            new_path = os.path.join(FACES_DIR, f"{child_id}.jpg")
+                            # Save the FULL frame, not the cropped face.
                             # DeepFace's detector fails on tightly cropped images.
                             cv2.imwrite(new_path, frame)
-                            print(f"Auto-registered new user to {new_path}")
+                            register_child(child_id)             # create DB record
+                            print(f"Auto-registered new child: {child_id}")
                             last_registration_time = time.time()
                             
                             # Clear DeepFace cache so the new user is recognized next time

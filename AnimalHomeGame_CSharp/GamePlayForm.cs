@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -19,6 +20,7 @@ public class GamePlayForm : Form
     private readonly UserProfile currentUser;
     private readonly MainForm parentScanner;
     private TuioHandler tuioHandler;
+    private readonly Stopwatch _gameTimer = new Stopwatch(); // tracks play time for high score
 
     // ── Emotion / Gaze / Lighting listener ────────────────────────────────
     private UdpClient? udpClient;
@@ -97,6 +99,7 @@ public class GamePlayForm : Form
         SetupEmotionListener();
         SetupYoloListener();
         SetupHandMenuListener();
+        _gameTimer.Start();   // begin timing
     }
 
     private void SetupGUI()
@@ -1173,14 +1176,17 @@ public class GamePlayForm : Form
             feedbackLabel.Text = "🏆 All animals are home! You win!";
             feedbackLabel.BackColor = Color.FromArgb(200, 20, 120, 20);
 
-            // Signal Python to save the gaze heatmap it has been building live
+            // Signal Python: save heatmap + record score
+            // Format: WIN:PlayerName,ElapsedSeconds  e.g.  WIN:User_1,42.5
             try
             {
-                string winMsg = $"WIN:{currentUser.PlayerName}";
+                _gameTimer.Stop();
+                double secs   = _gameTimer.Elapsed.TotalSeconds;
+                string winMsg = $"WIN:{currentUser.PlayerName},{secs:F1}";
                 using var winSock = new System.Net.Sockets.UdpClient();
                 byte[] bytes = System.Text.Encoding.UTF8.GetBytes(winMsg);
                 winSock.Send(bytes, bytes.Length, "127.0.0.1", 5009);
-                ShowFeedback("📊 Heatmap saving… check Desktop\\GazeHeatmaps!", Color.DeepSkyBlue);
+                ShowFeedback($"🏅 Time: {secs:F0}s — saving score…", Color.DeepSkyBlue);
             }
             catch (Exception ex)
             {

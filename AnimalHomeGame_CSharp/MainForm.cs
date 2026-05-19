@@ -105,54 +105,53 @@ public partial class MainForm : Form
             action();
     }
 
-    private void ProcessLogin(string username)
+    private void ProcessLogin(string message)
     {
         if (isAuthenticated) return;
         isAuthenticated = true;
 
-        List<UserProfile> profiles = ProfileManager.LoadProfiles();
-        
-        // We'll use the Username as the ID since we dropped Bluetooth
-        UserProfile? existingProfile = profiles.FirstOrDefault(p => p.PlayerName == username);
+        // Message format: "username:role"  (role added by ai_vision.py)
+        // Fall back to "child" if role is missing (backward compat)
+        string[] parts   = message.Split(':', 2);
+        string username  = parts[0].Trim();
+        string role      = parts.Length > 1 ? parts[1].Trim().ToLower() : "child";
 
-        UserProfile activeProfile = null;
-
-        if (existingProfile != null)
+        // Build the in-memory profile (Python owns persistence)
+        UserProfile activeProfile = ProfileManager.Find(username, role) ?? new UserProfile
         {
-            activeProfile = existingProfile;
-            statusLabel.Text = $"Welcome back, {existingProfile.PlayerName}!";
-            instructionsLabel.Text = $"Face Recognized.\nYour Role: {existingProfile.Role}\n\nGetting everything ready for you...";
-            statusLabel.ForeColor = Color.Green;
-            instructionsLabel.ForeColor = Color.Black;
+            Id         = username,
+            PlayerName = username,
+            Role       = role,
+        };
+
+        if (role == "teacher")
+        {
+            statusLabel.Text      = $"Welcome, {username}! (Teacher)";
+            instructionsLabel.Text = "Redirecting to Teacher Dashboard...";
+            statusLabel.ForeColor  = Color.DarkViolet;
         }
         else
         {
-            string newRole = profiles.Count == 0 ? "Admin" : "User";
-            
-            UserProfile newProfile = new UserProfile 
-            {
-                PlayerName = username,
-                BluetoothDeviceId = "FACE_ID_" + username, // Keep field populated to avoid breaking existing serialization
-                Role = newRole
-            };
-            
-            profiles.Add(newProfile);
-            ProfileManager.SaveProfiles(profiles);
-
-            activeProfile = newProfile;
-            statusLabel.Text = $"Account Created for {newProfile.PlayerName}!";
-            instructionsLabel.Text = $"New Face Registered.\nYour Role: {newProfile.Role}\n\nGetting everything ready for you...";
-            statusLabel.ForeColor = Color.Blue;
-            instructionsLabel.ForeColor = Color.Black;
+            statusLabel.Text      = $"Welcome, {username}!";
+            instructionsLabel.Text = "Getting everything ready for you...";
+            statusLabel.ForeColor  = Color.Green;
         }
-        
+        instructionsLabel.ForeColor = Color.Black;
+
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 2000 };
         timer.Tick += (s, args) =>
         {
             timer.Stop();
-            // Skip the intermediate GameForm menu — go straight to gameplay
-            GamePlayForm gamePlay = new GamePlayForm(activeProfile, this);
-            gamePlay.Show();
+            if (activeProfile.Role == "teacher")
+            {
+                var dash = new AdminDashboardForm(activeProfile, this);
+                dash.Show();
+            }
+            else
+            {
+                var gamePlay = new GamePlayForm(activeProfile, this);
+                gamePlay.Show();
+            }
             this.Hide();
         };
         timer.Start();
