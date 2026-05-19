@@ -53,5 +53,10 @@
     "PlayerName": "User_3",
     "BluetoothDeviceId": "FACE_ID_User_3",
     "Role": "User"
+  },
+  {
+    "PlayerName": "TestPlayer",
+    "BluetoothDeviceId": "FACE_ID_TestPlayer",
+    "Role": "User"
   }
 ]

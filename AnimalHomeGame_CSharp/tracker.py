@@ -1,22 +1,7 @@
 """
-tracker.py — Unified multi-modal input tracker for Animal Home Game
-====================================================================
-Kid-friendly Hand Menu (no keyboard) lets you pick ONE input modality:
-
-    1. OBJECT    -> YOLOv8 detects a real animal toy/picture
-    2. SKELETON  -> MediaPipe tracks your hand
-    3. LASER     -> OpenCV tracks a green laser dot
-
-All three feed the SAME unified output layer, sending the SAME JSON
-on the SAME UDP port (5006) that yolo_tracker.py uses, so the C# game
-treats them identically to TUIO.
-
-Animal switching is done by SCREEN ZONE (no keyboard): the camera
-frame is split into 4 quadrants, one per animal.
-
-Trajectory is SMOOTHED so the animal glides instead of jumping.
-A GRACE PERIOD keeps the animal held during brief tracking dropouts.
-Press Q in the window to quit.
+tracker.py — FINAL VERSION
+OBJECT + SKELETON + RED LASER
+Animal Home Game
 """
 
 import cv2
@@ -24,328 +9,692 @@ import socket
 import json
 import time
 import sys
-import math
 
-# ──────────────────────────────────────────────────────────────────────────
+# =========================================================
 # CONFIG
-# ──────────────────────────────────────────────────────────────────────────
-UDP_IP   = "127.0.0.1"
-UDP_PORT = 5006          # same port yolo_tracker.py uses
+# =========================================================
 
-def quadrant_to_animal(nx, ny):
-    if ny < 0.5:
-        return 0 if nx < 0.5 else 1      # top-left Bird / top-right Dog
-    else:
-        return 2 if nx < 0.5 else 3      # bottom-left Fish / bottom-right Farm
+UDP_IP = "127.0.0.1"
+UDP_PORT = 5006
 
-SMOOTH = 0.35            # trajectory smoothing (0=frozen, 1=no smoothing)
-
-CLASS_TO_ANIMAL_ID = {
-    "bird":  0,
-    "dog":   1,
-    "fish":  2,
-    "sheep": 3,
-}
-
-MIRROR_WIN = "Camera (mirror)"
-MAIN_WIN   = "Choose how to play!"
+SMOOTH = 0.35
+GRACE = 0.5
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+# =========================================================
+# YOLO CLASS MAP
+# =========================================================
 
-# ──────────────────────────────────────────────────────────────────────────
-# UNIFIED OUTPUT LAYER  (grace period prevents premature "removed")
-# ──────────────────────────────────────────────────────────────────────────
-class TrajectoryEmitter:
+CLASS_TO_ANIMAL_ID = {
+    "bird": 0,
+    "dog": 1,
+    "fish": 2,
+    "cow": 3
+}
+
+# =========================================================
+
+MIRROR_WIN = "Camera"
+MENU_WIN = "Choose how to play!"
+
+# =========================================================
+# ZONES
+# =========================================================
+
+def zone_to_animal(ny):
+
+    if ny < 0.25:
+        return 0   # bird
+
+    elif ny < 0.50:
+        return 1   # dog
+
+    elif ny < 0.75:
+        return 2   # fish
+
+    else:
+        return 3   # cow
+
+# =========================================================
+# UDP EMITTER
+# =========================================================
+
+class Emitter:
+
     def __init__(self):
-        self.active_id    = None
-        self.smooth_x     = None
-        self.smooth_y     = None
-        self.lost_since   = None      # when the input first disappeared
-        self.GRACE_SECS   = 0.6       # keep holding the animal this long
 
-    def _send(self, event, animal_id, x, y):
-        msg = json.dumps({
-            "event": event,
-            "id":    animal_id,
-            "x":     round(float(x), 4),
-            "y":     round(float(y), 4),
-        })
-        sock.sendto(msg.encode(), (UDP_IP, UDP_PORT))
-
-    def update(self, nx, ny):
-        self.lost_since = None        # input is visible again
-        animal_id = quadrant_to_animal(nx, ny)
-        if self.active_id is not None and animal_id != self.active_id:
-            self._send("removed", self.active_id, 0.0, 0.0)
-            self.active_id = None
-            self.smooth_x = self.smooth_y = None
-        if self.active_id is None:
-            self.active_id = animal_id
-            self.smooth_x, self.smooth_y = nx, ny
-            self._send("added", animal_id, nx, ny)
-        else:
-            self.smooth_x += SMOOTH * (nx - self.smooth_x)
-            self.smooth_y += SMOOTH * (ny - self.smooth_y)
-            self._send("update", animal_id, self.smooth_x, self.smooth_y)
-
-    def lost(self):
-        if self.active_id is None:
-            return
-        if self.lost_since is None:
-            self.lost_since = time.time()
-            return
-        if time.time() - self.lost_since < self.GRACE_SECS:
-            return                    # still within grace — keep the animal
-        self._send("removed", self.active_id, 0.0, 0.0)
-        self.active_id = None
-        self.smooth_x = self.smooth_y = None
+        self.held_id = None
+        self.sx = None
+        self.sy = None
         self.lost_since = None
 
+    def _send(self, ev, aid, x, y):
 
-emitter = TrajectoryEmitter()
+        msg = {
+            "event": ev,
+            "id": aid,
+            "x": round(float(x), 4),
+            "y": round(float(y), 4)
+        }
 
+        sock.sendto(
+            json.dumps(msg).encode(),
+            (UDP_IP, UDP_PORT)
+        )
 
-# ──────────────────────────────────────────────────────────────────────────
-# SMALL CORNER MIRROR
-# ──────────────────────────────────────────────────────────────────────────
-def show_mirror(frame, mode_label):
-    small = cv2.resize(frame, (240, 180))
-    cv2.putText(small, mode_label, (8, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    def update(self, nx, ny, forced_id=None):
+
+        self.lost_since = None
+
+        aid = forced_id if forced_id is not None else zone_to_animal(ny)
+
+        # first grab
+        if self.held_id is None:
+
+            self.held_id = aid
+            self.sx = nx
+            self.sy = ny
+
+            self._send("added", aid, nx, ny)
+
+        # switch animal
+        elif aid != self.held_id:
+
+            self._send("removed", self.held_id, 0.0, 0.0)
+
+            self.held_id = aid
+
+            self.sx = nx
+            self.sy = ny
+
+            self._send("added", aid, nx, ny)
+
+        # update same animal
+        else:
+
+            self.sx += SMOOTH * (nx - self.sx)
+            self.sy += SMOOTH * (ny - self.sy)
+
+            self._send(
+                "update",
+                self.held_id,
+                self.sx,
+                self.sy
+            )
+
+    def release(self):
+
+        if self.held_id is None:
+            return
+
+        if self.lost_since is None:
+
+            self.lost_since = time.time()
+            return
+
+        if time.time() - self.lost_since < GRACE:
+            return
+
+        self._send(
+            "removed",
+            self.held_id,
+            0.0,
+            0.0
+        )
+
+        self.held_id = None
+        self.sx = None
+        self.sy = None
+        self.lost_since = None
+
+# =========================================================
+
+emitter = Emitter()
+
+# =========================================================
+# CAMERA PREVIEW
+# =========================================================
+
+def show_mirror(frame, label):
+
+    small = cv2.resize(frame, (320, 240))
+
+    cv2.putText(
+        small,
+        label,
+        (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2
+    )
+
     cv2.imshow(MIRROR_WIN, small)
-    cv2.moveWindow(MIRROR_WIN, 10, 10)
 
+# =========================================================
+# MENU
+# =========================================================
 
-def draw_zones(frame):
-    h, w = frame.shape[:2]
-    cv2.line(frame, (w // 2, 0), (w // 2, h), (80, 80, 80), 1)
-    cv2.line(frame, (0, h // 2), (w, h // 2), (80, 80, 80), 1)
+def run_menu(cap):
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# KID-FRIENDLY HAND MENU
-# ──────────────────────────────────────────────────────────────────────────
-def run_hand_menu(cap):
     import mediapipe as mp
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.6)
+
+    hands = mp.solutions.hands.Hands(
+        max_num_hands=1,
+        min_detection_confidence=0.6
+    )
 
     options = [
-        ("OBJECT",   "object",   "[O]", (60, 90, 245)),
-        ("SKELETON", "skeleton", "[/]", (90, 200, 60)),
-        ("LASER",    "laser",    "[*]", (245, 150, 40)),
+        ("OBJECT", "object", (60, 90, 245)),
+        ("SKELETON", "skeleton", (90, 200, 60)),
+        ("LASER", "laser", (245, 150, 40))
     ]
 
-    hover_key   = None
-    hover_start = 0.0
-    HOLD_SECS   = 2.0
+    hover_key = None
+    hover_start = 0
 
-    cv2.namedWindow(MAIN_WIN, cv2.WINDOW_NORMAL)
+    HOLD_TIME = 2.0
+
+    cv2.namedWindow(MENU_WIN, cv2.WINDOW_NORMAL)
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
+
+        ok, frame = cap.read()
+
+        if not ok:
             continue
+
         frame = cv2.flip(frame, 1)
+
         h, w = frame.shape[:2]
 
         overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, h), (40, 20, 40), -1)
-        frame = cv2.addWeighted(overlay, 0.45, frame, 0.55, 0)
 
-        cv2.putText(frame, "CHOOSE HOW TO PLAY!", (int(w * 0.13), 55),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.1, (255, 255, 255), 3)
+        cv2.rectangle(
+            overlay,
+            (0, 0),
+            (w, h),
+            (40, 20, 40),
+            -1
+        )
+
+        frame = cv2.addWeighted(
+            overlay,
+            0.45,
+            frame,
+            0.55,
+            0
+        )
+
+        cv2.putText(
+            frame,
+            "CHOOSE HOW TO PLAY!",
+            (int(w * 0.12), 55),
+            cv2.FONT_HERSHEY_DUPLEX,
+            1.1,
+            (255, 255, 255),
+            3
+        )
 
         bands = []
-        for i, (label, key, sym, color) in enumerate(options):
+
+        for i, (label, key, color) in enumerate(options):
+
             y1 = int(h * (0.20 + i * 0.25))
             y2 = y1 + int(h * 0.18)
-            bands.append((key, label, sym, color, y1, y2))
+
+            bands.append((key, label, color, y1, y2))
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = hands.process(rgb)
-        hand_pt = None
-        if res.multi_hand_landmarks:
-            lm = res.multi_hand_landmarks[0].landmark[9]
-            hand_pt = (int(lm.x * w), int(lm.y * h))
 
-        current_key = None
-        for key, label, sym, color, y1, y2 in bands:
-            hovering = hand_pt is not None and y1 < hand_pt[1] < y2
-            bx1, bx2 = int(w * 0.15), int(w * 0.85)
-            pad = 14 if hovering else 0
-            fill = tuple(min(255, c + 40) for c in color) if hovering else color
-            cv2.rectangle(frame, (bx1 - pad, y1 - pad), (bx2 + pad, y2 + pad),
-                          fill, -1)
-            cv2.rectangle(frame, (bx1 - pad, y1 - pad), (bx2 + pad, y2 + pad),
-                          (255, 255, 255), 3)
-            txt_scale = 1.5 if hovering else 1.2
-            cv2.putText(frame, f"{sym}  {label}",
-                        (bx1 + 30, (y1 + y2) // 2 + 12),
-                        cv2.FONT_HERSHEY_DUPLEX, txt_scale, (255, 255, 255), 3)
-            if hovering:
-                current_key = key
+        result = hands.process(rgb)
+
+        hand_pos = None
+
+        if result.multi_hand_landmarks:
+
+            lm = result.multi_hand_landmarks[0].landmark[9]
+
+            hand_pos = (
+                int(lm.x * w),
+                int(lm.y * h)
+            )
+
+        current_hover = None
+
+        for key, label, color, y1, y2 in bands:
+
+            hovered = (
+                hand_pos is not None
+                and y1 < hand_pos[1] < y2
+            )
+
+            bx1 = int(w * 0.15)
+            bx2 = int(w * 0.85)
+
+            pad = 14 if hovered else 0
+
+            fill = (
+                tuple(min(255, c + 40) for c in color)
+                if hovered else color
+            )
+
+            cv2.rectangle(
+                frame,
+                (bx1 - pad, y1 - pad),
+                (bx2 + pad, y2 + pad),
+                fill,
+                -1
+            )
+
+            cv2.rectangle(
+                frame,
+                (bx1 - pad, y1 - pad),
+                (bx2 + pad, y2 + pad),
+                (255, 255, 255),
+                3
+            )
+
+            scale = 1.5 if hovered else 1.2
+
+            cv2.putText(
+                frame,
+                label,
+                (bx1 + 30, (y1 + y2) // 2 + 12),
+                cv2.FONT_HERSHEY_DUPLEX,
+                scale,
+                (255, 255, 255),
+                3
+            )
+
+            if hovered:
+
+                current_hover = key
+
                 if key == hover_key:
-                    held = time.time() - hover_start
-                    frac = min(1.0, held / HOLD_SECS)
-                    cv2.ellipse(frame, hand_pt, (45, 45), 0, -90,
-                                -90 + int(360 * frac), (0, 255, 255), 6)
 
-        if current_key is not None:
-            if current_key != hover_key:
-                hover_key = current_key
+                    progress = min(
+                        1.0,
+                        (time.time() - hover_start) / HOLD_TIME
+                    )
+
+                    cv2.ellipse(
+                        frame,
+                        hand_pos,
+                        (45, 45),
+                        0,
+                        -90,
+                        -90 + int(360 * progress),
+                        (0, 255, 255),
+                        6
+                    )
+
+        if current_hover:
+
+            if current_hover != hover_key:
+
+                hover_key = current_hover
                 hover_start = time.time()
-            if time.time() - hover_start >= HOLD_SECS:
+
+            if time.time() - hover_start >= HOLD_TIME:
+
                 hands.close()
-                cv2.destroyWindow(MAIN_WIN)
-                return hover_key
+
+                cv2.destroyWindow(MENU_WIN)
+
+                return current_hover
+
         else:
+
             hover_key = None
 
-        if hand_pt is not None:
-            cv2.circle(frame, hand_pt, 10, (0, 255, 255), -1)
+        if hand_pos:
 
-        cv2.putText(frame, "Hold your hand on a button for 2 seconds",
-                    (int(w * 0.12), h - 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.circle(
+                frame,
+                hand_pos,
+                10,
+                (0, 255, 255),
+                -1
+            )
 
-        cv2.imshow(MAIN_WIN, frame)
+        cv2.putText(
+            frame,
+            "Hold your hand on a button for 2s",
+            (int(w * 0.10), h - 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.imshow(MENU_WIN, frame)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
+
             hands.close()
             sys.exit(0)
 
+# =========================================================
+# SKELETON
+# =========================================================
 
-# ──────────────────────────────────────────────────────────────────────────
-# MODALITY 1: OBJECT  (YOLO)
-# ──────────────────────────────────────────────────────────────────────────
-def run_object(cap):
-    from ultralytics import YOLO
-    model = YOLO("yolov8n.pt")
-    print("[OBJECT] YOLO ready")
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.flip(frame, 1)
-        results = model.track(frame, persist=True, verbose=False)[0]
-        found = False
-        for box in results.boxes:
-            cls_name = model.names[int(box.cls)]
-            if cls_name not in CLASS_TO_ANIMAL_ID:
-                continue
-            cx, cy = box.xywhn[0][:2].tolist()
-            emitter.update(cx, cy)
-            found = True
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (50, 200, 80), 2)
-            break
-        if not found:
-            emitter.lost()
-        draw_zones(frame)
-        show_mirror(frame, "OBJECT")
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# MODALITY 2: SKELETON  (MediaPipe hand)  — X axis fixed
-# ──────────────────────────────────────────────────────────────────────────
 def run_skeleton(cap):
+
     import mediapipe as mp
-    mp_hands = mp.solutions.hands
-    mp_draw  = mp.solutions.drawing_utils
-    hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.6,
-                           min_tracking_confidence=0.6)
-    print("[SKELETON] MediaPipe ready")
+
+    hands = mp.solutions.hands.Hands(
+        max_num_hands=1,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    )
+
+    draw = mp.solutions.drawing_utils
+
+    HC = mp.solutions.hands.HAND_CONNECTIONS
+
+    print("[SKELETON] ready")
+
     while True:
-        ret, frame = cap.read()
-        if not ret:
+
+        ok, frame = cap.read()
+
+        if not ok:
             break
+
         frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = hands.process(rgb)
-        if res.multi_hand_landmarks:
-            hand = res.multi_hand_landmarks[0]
-            mp_draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+
+        result = hands.process(rgb)
+
+        if result.multi_hand_landmarks:
+
+            hand = result.multi_hand_landmarks[0]
+
+            draw.draw_landmarks(frame, hand, HC)
+
             lm = hand.landmark[9]
-            emitter.update(1.0 - lm.x, lm.y)
+
+            emitter.update(
+                1.0 - lm.x,
+                lm.y
+            )
+
         else:
-            emitter.lost()
-        draw_zones(frame)
+
+            emitter.release()
+
         show_mirror(frame, "SKELETON")
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
     hands.close()
 
+# =========================================================
+# RED LASER
+# =========================================================
 
-# ──────────────────────────────────────────────────────────────────────────
-# MODALITY 3: LASER  (green dot tracking)
-# ──────────────────────────────────────────────────────────────────────────
 def run_laser(cap):
+
     import numpy as np
-    print("[LASER] tracking green dot")
-    LOWER = np.array([40, 80, 80])
-    UPPER = np.array([90, 255, 255])
+
+    print("[RED LASER] ready")
+
+    LOW1 = np.array([0, 120, 70])
+    HIGH1 = np.array([10, 255, 255])
+
+    LOW2 = np.array([170, 120, 70])
+    HIGH2 = np.array([180, 255, 255])
+
+    locked_id = None
+
+    smooth_x = None
+    smooth_y = None
+
+    LASER_SMOOTH = 0.18
+
     while True:
-        ret, frame = cap.read()
-        if not ret:
+
+        ok, frame = cap.read()
+
+        if not ok:
             break
+
         frame = cv2.flip(frame, 1)
+
         h, w = frame.shape[:2]
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, LOWER, UPPER)
+
+        mask1 = cv2.inRange(hsv, LOW1, HIGH1)
+        mask2 = cv2.inRange(hsv, LOW2, HIGH2)
+
+        mask = mask1 | mask2
+
+        mask = cv2.GaussianBlur(mask, (9, 9), 0)
+
         mask = cv2.erode(mask, None, iterations=2)
         mask = cv2.dilate(mask, None, iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
         if contours:
+
             c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > 30:
+
+            area = cv2.contourArea(c)
+
+            if area > 25:
+
                 M = cv2.moments(c)
+
                 if M["m00"] != 0:
+
                     px = int(M["m10"] / M["m00"])
                     py = int(M["m01"] / M["m00"])
-                    emitter.update(px / w, py / h)
-                    cv2.circle(frame, (px, py), 12, (0, 0, 255), 2)
+
+                    if smooth_x is None:
+
+                        smooth_x = px
+                        smooth_y = py
+
+                    else:
+
+                        smooth_x += LASER_SMOOTH * (px - smooth_x)
+                        smooth_y += LASER_SMOOTH * (py - smooth_y)
+
+                    sx = int(smooth_x)
+                    sy = int(smooth_y)
+
+                    nx = sx / w
+                    ny = sy / h
+
+                    if locked_id is None:
+                        locked_id = zone_to_animal(ny)
+
+                    emitter.update(
+                        nx,
+                        ny,
+                        forced_id=locked_id
+                    )
+
+                    cv2.circle(
+                        frame,
+                        (sx, sy),
+                        18,
+                        (0, 255, 255),
+                        3
+                    )
+
+                    animal_name = [
+                        "BIRD",
+                        "DOG",
+                        "FISH",
+                        "COW"
+                    ][locked_id]
+
+                    cv2.putText(
+                        frame,
+                        f"LOCKED: {animal_name}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 255),
+                        2
+                    )
+
                 else:
-                    emitter.lost()
+
+                    emitter.release()
+
+                    locked_id = None
+                    smooth_x = None
+                    smooth_y = None
+
             else:
-                emitter.lost()
+
+                emitter.release()
+
+                locked_id = None
+                smooth_x = None
+                smooth_y = None
+
         else:
-            emitter.lost()
-        draw_zones(frame)
-        show_mirror(frame, "LASER")
+
+            emitter.release()
+
+            locked_id = None
+            smooth_x = None
+            smooth_y = None
+
+        show_mirror(frame, "RED LASER")
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+# =========================================================
+# OBJECT MODE
+# =========================================================
 
-# ──────────────────────────────────────────────────────────────────────────
+def run_object(cap):
+
+    from ultralytics import YOLO
+
+    model = YOLO("yolov8n.pt")
+
+    print("[OBJECT] ready")
+
+    while True:
+
+        ok, frame = cap.read()
+
+        if not ok:
+            break
+
+        frame = cv2.flip(frame, 1)
+
+        results = model.track(
+            frame,
+            persist=True,
+            verbose=False
+        )[0]
+
+        found = False
+
+        for box in results.boxes:
+
+            cls = model.names[int(box.cls)]
+
+            if cls not in CLASS_TO_ANIMAL_ID:
+                continue
+
+            aid = CLASS_TO_ANIMAL_ID[cls]
+
+            cx, cy = box.xywhn[0][:2].tolist()
+
+            emitter.update(
+                cx,
+                cy,
+                forced_id=aid
+            )
+
+            found = True
+
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+            cv2.rectangle(
+                frame,
+                (x1, y1),
+                (x2, y2),
+                (50, 200, 80),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                cls,
+                (x1, max(y1 - 8, 14)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (50, 200, 80),
+                2
+            )
+
+            break
+
+        if not found:
+            emitter.release()
+
+        show_mirror(frame, "OBJECT")
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+# =========================================================
 # MAIN
-# ──────────────────────────────────────────────────────────────────────────
+# =========================================================
+
 def main():
+
     cap = cv2.VideoCapture(0)
+
     if not cap.isOpened():
-        print("ERROR: Cannot open camera (index 0). Try index 1.")
+
+        print("ERROR: camera not found")
         return
 
-    print("Opening Hand Menu — hover a button for 2 seconds to choose.")
-    mode = run_hand_menu(cap)
-    print(f"Selected mode: {mode}")
+    mode = run_menu(cap)
 
-    if   mode == "object":
+    print("Mode:", mode)
+
+    if mode == "object":
+
         run_object(cap)
+
     elif mode == "skeleton":
+
         run_skeleton(cap)
+
     elif mode == "laser":
+
         run_laser(cap)
 
     cap.release()
-    cv2.destroyAllWindows()
-    sock.close()
-    print("Tracker stopped.")
 
+    cv2.destroyAllWindows()
+
+    sock.close()
+
+    print("Stopped.")
+
+# =========================================================
 
 if __name__ == "__main__":
     main()
